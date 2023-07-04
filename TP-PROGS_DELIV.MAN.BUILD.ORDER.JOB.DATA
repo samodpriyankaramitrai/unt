@@ -1,0 +1,1274 @@
+      SUBROUTINE DELIV.MAN.BUILD.ORDER.JOB.DATA(DELIVERY.ID, JOB.DATA, ERROR.MESSAGE, MODE,
+         PASSED.ORDER.HEADER.FV, PASSED.ORDER.LINE.FV, ARRAY.OF.VALID.LINE.NBRS)
+      PROGRAM.NAME = "DELIV.MAN.BUILD.ORDER.JOB.DATA"
+
+**************************************************************************
+* Description
+* ~~~~~~~~~~~
+*
+* Program gets the raw data needed for the Delivery Management Job middleware
+* message for Delivery Orders
+* Caters for 'B' - cash customer,'F'- account customer, 'M' - IBTs
+*
+* Inputs:
+* DELIVERY.ID            = deliveryDate '*' orderNumber '*' version '*' branch
+* MODE                   : LIVE = Called from user documents, use local Ord Hdr/Line file pointers
+*                        : TEST = Called from Initial Loads, use passed Ord Hrdr/Line file pointers
+*                        : LOAD = Called from Initial Loads, use passed Ord Hrdr/Line file pointers
+* PASSED.ORDER.HEADER.FV = File pointer for TEST and LOAD modes
+
+* Outputs:
+* JOB.DATA               = array of data required for middleware DM job message
+* ERROR.MESSAGE          = "" if no error else error details
+**************************************************************************
+* Author       : mgamb
+* Date Written : 17/01/2020
+*
+* Job #    Date     Inits       Comments
+* ======== ======== =========== ==========================================
+* 15624r01 17/01/20 mgamb       Original version
+* 15624r01 07/02/20 lneal       Amend vehicle restrictions field
+* 15624r01 13/02/20 pfala       Add parameters for Initial Load
+* 15624r01 02/03/20 mgamb       Add delivery address hashing - call
+*                               DELIV.MAN.GENERATE.ADDRESS.HASH
+* 15624r01 03/03/20 mgamb       Add split ticket amounts to follow - call
+*                               DELIV.MAN.GET.BALANCE.TO.FOLLOW
+* 15624r14 30/03/20 mgamb       scp-1419 versioning/restructure id
+* 15624r14 14/04/20 pfala       Split Tickets
+* 15624r14 16/04/20 mgamb       Change default values from "" to "0"
+* 15624r14 17/04/20 mgamb       scp-1419 versioning/restructure id
+* 15624r14 28/04/20 sdobb       Only include lines if in Array of Valid Line Nbrs
+*                               Read order lines from ticket common
+* 15624r14 18/05/20 pfala       SCP-1458 Job Data Fixes
+* 15625r14 12/05/20 sdobb       Replace BEFORE.NINE with SPECIAL.CONDITIONS
+*                               Call DELIV.MAN.GET.INSTRUCTIONS to
+*                               populate INSTRUCTIONS and SPECIAL.CONDITIONS
+* 15624r14 06/06/20 pfala       SCP-1383 Map Old Contacts To New
+* 15624r14 10/06/20 mgamb       SCP-1508 Change JOB.LINE.ORIGINATOR.KEY format
+* 15624r14 12/06/20 pfala       SCP-1498 Balance To Follow - Pass Order Line FV
+* 15624r14 19/06/20 pfala       SCP-1497 Dont Send Split Zero Qtys
+* 15624r14 16/07/20 pfala       SCP-1558 Update JOB.SALES.COST.CENTRE if not remote ticket
+* 15624r14 20/07/20 pfala       SCP-1557 Health And Safety Questions
+* 15624rxx 16/09/20 jpyc        SCP-1653 Cash split weight
+* 15624r47 24/11/20 lneal       SCP-1739 Blank address on remotes
+* 15655    11/01/21 jpyc        SCP-1707 Make split B tickets work
+* 15655r06 09/01/21 ams         SCP-1774 Split B ticket - sending restrictions to OF
+* 15655r11 28/01/21 sdobb       SCP-1794 Add product dimensions
+* 15655r11 11/02/21 sdobb       SCP-1795 Calculate dimensions from volume
+*                               for line, if entered
+* 15655rnn 24/02/21 lneal       SCP-1755 Amend validation for earliest/latest times
+* 15655rnn 08/03/21 ams         SCP-1844 Only send volume to openfleet if set in param
+* 15655r35 12/05/21 mgamb       SCP-1797 Identify BMX jobs
+* 15655r35 06/08/21 lneal       SCP-1982 Add additional BMX attributes
+* 15672r22 10/11/21 vissi       SCP-2120 Don't send CE and Chain of Custody to Openfleet
+* 15672r34 15/03/22 umaan       SCP-2284 JOB.CUST.EPOD.EMAIL is polpulated with receiving branch email address
+*                               instead of fulfilling branch email address
+* 15672r36 24/03/22 umaan       SCP-2299 Set the service level for TP jobs
+* 15679r33 16/05/22 maptt       CR038 - Group F Tickets for Delivery
+* 15672r94 22/08/22 umaan       SCP-2437 Additional variables added to
+*                               ERROR.MESSAGE
+* 15714r74 02/03/23 dimdi       SCP-2544 Add the word RESTRICTED to the front
+*                               of the product description and reorder the products
+* 15714r88 20/04/23 dimdi       SCP-2585 Check Job within POC Critera and
+*                               set JOB.LINE.PRODUCT.SCAN.COUNT
+**************************************************************************
+      INCLUDE INCLUDES MN.TERMWORK.COMMON
+************
+* INCLUDES *
+************
+
+      INCLUDE INCLUDES EQU.TERMWORK
+      INCLUDE INCLUDES EQU.DELIV.MAN.JOB.DATA
+      INCLUDE INCLUDES EQU.ORDER.HEADER.REC
+      INCLUDE INCLUDES EQU.ORDER.LINE.DIM
+      INCLUDE INCLUDES EQU.PF.PRODUCT.MASTER.DIM
+      INCLUDE INCLUDES EQU.PF.MCP.PRODUCTS.DIM
+      INCLUDE INCLUDES BS.OE.TICKET.COMMON
+
+**************
+* FILE OPENS *
+**************
+
+      ACCOUNT.NAME = OCONV(@WHO, "MCU")
+      ERR = ""
+      ERROR.MESSAGE = ""
+      JOB.DATA = ""
+
+      INCLUDE INCLUDES OPEN.FILE.TERMWORK
+      INCLUDE INCLUDES OPEN.FILE.BRN.DETAIL
+      INCLUDE INCLUDES OPEN.FILE.HO.CUSTOMER
+      INCLUDE INCLUDES OPEN.FILE.BS.DELIVERY.SLOTS
+      INCLUDE INCLUDES OPEN.FILE.PF.PRODUCT.MASTER
+      INCLUDE INCLUDES OPEN.FILE.PF.MCP.PRODUCTS
+      INCLUDE INCLUDES OPEN.FILE.SY.PARAMS
+      INCLUDE INCLUDES OPEN.FILE.PO.HEADER
+      INCLUDE INCLUDES OPEN.FILE.PO.LINE
+
+      IF NOT(INDEX("/LIVE/TEST/LOAD/", "/" : MODE : "/", 1)) THEN
+         ERROR.MESSAGE = "Program: " : PROGRAM.NAME : " Invalid Mode: " : MODE
+         RETURN
+      END
+
+      IF MODE = "LIVE" THEN
+         INCLUDE INCLUDES OPEN.FILE.ORDER.HEADER
+      END ELSE
+         IF NOT(FILEINFO(PASSED.ORDER.HEADER.FV, 0)) THEN
+            ERR = " ORDER-HEADER "
+         END
+         ORDER.HEADER.FV = PASSED.ORDER.HEADER.FV
+      END
+
+      IF ERR = "" THEN
+         GOSUB MAIN.PROG
+      END ELSE
+         ERROR.MESSAGE = "Program: " : PROGRAM.NAME : " CANNOT OPEN FILES " : CHANGE(ERR, @AM, ", ")
+      END
+
+      RETURN
+
+**************************************************************************
+MAIN.PROG:
+**********
+
+      GOSUB INITIALISE
+      IF ERROR.MESSAGE = "" THEN
+         GOSUB BUILD.JOB.DATA
+      END
+
+      RETURN
+
+**************************************************************************
+INITIALISE:
+***********
+
+      ORDER.NUMBER.FULL = FIELD(DELIVERY.ID, "*", 2)
+      ORDER.NUMBER = FIELD(ORDER.NUMBER.FULL, "-", 1)
+      SPLIT.NUMBER = FIELD(ORDER.NUMBER.FULL, "-", 2) + 0
+
+      ORDER.TYPE = ORDER.NUMBER[1,1]
+      BRANCH.CODE = FIELD(DELIVERY.ID, "*", 4)
+      VERSION = FIELD(DELIVERY.ID, "*", 3)
+      DELIVERY.DATE = FIELD(DELIVERY.ID, "*", 1)
+
+      READV BRANCH.BRAND FROM BRN.DETAIL.FV , BRANCH.CODE, 65 ELSE BRANCH.BRAND = ""
+      BRANCH.BRAND = BRANCH.BRAND[2,1]
+
+      DELIV.MAN.BRAND.SEND.VOLUME = @FALSE
+      READV BRAND.SEND.VOLUME FROM SY.PARAMS.FV, "DELIVERY.MANAGEMENT.PARAMS", 31 THEN
+         LOCATE BRANCH.BRAND[2,1] IN BRAND.SEND.VOLUME<1> SETTING POS THEN
+            DELIV.MAN.BRAND.SEND.VOLUME = @TRUE
+         END
+      END
+
+      ORDER.HEADER.KEY = ORDER.NUMBER[6,1] : ORDER.TYPE : BRANCH.CODE : ORDER.NUMBER[2,4]
+      MATREAD ORDER.HEADER.REC FROM ORDER.HEADER.FV, ORDER.HEADER.KEY ELSE
+         CALL UTL.SYSTEM(9001, STACK.TRACE)
+         ERROR.MESSAGE = "Program: " : PROGRAM.NAME : " Order Number not found " : ORDER.HEADER.KEY
+         ERROR.MESSAGE := " Account Name: " : ACCOUNT.NAME : " " : LOWER(STACK.TRACE)
+      END
+
+      GOSUB GET.SPLIT.DATA
+
+      LINE.DISPLAY.NUMBER = ""
+      LINE.ORIGINATOR.KEY = ""
+      LINE.DELIVERY.OR.COLLECTION = ""
+      LINE.PRODUCT.CODE = ""
+      LINE.BARCODE = ""
+      LINE.QUANTITY = ""
+      LINE.UOM = ""
+      LINE.DESCRIPTION = ""
+      LINE.WEIGHT = ""
+      LINE.LENGTH = ""
+      LINE.WIDTH = ""
+      LINE.DEPTH = ""
+      LINE.INDICATOR = ""
+      LINE.RESTRICTED = ""
+      LINE.SCAN.COUNT = ""
+
+      READV AGE.RESTRICTED.ITEM.LIST.REC FROM SY.PARAMS.FV, "AGE.RESTRICTED.ITEM.LIST",3 ELSE
+         AGE.RESTRICTED.ITEM.LIST.REC = ""
+      END
+
+      READV BS.POISON.PROD.LIST.REC FROM SY.PARAMS.FV, "BS.POISON.PROD.LIST",1 ELSE
+         BS.POISON.PROD.LIST.REC = ""
+      END
+
+      READ EXPLOSIVE.PRODUCT.LIST.REC FROM SY.PARAMS.FV, "EXPLOSIVE.PRODUCT.LIST" ELSE
+         EXPLOSIVE.PRODUCT.LIST.REC = ""
+      END
+
+      EXPLOSIVE.PRODUCT.LIST.ONE = EXPLOSIVE.PRODUCT.LIST.REC<1>
+      EXPLOSIVE.PRODUCT.LIST.TWO = EXPLOSIVE.PRODUCT.LIST.REC<2>
+
+      READV RESTRICTED FROM SY.PARAMS.FV, "DELIVERY.MANAGEMENT.PARAMS", 57 ELSE
+      END
+      IF RESTRICTED = "" OR RESTRICTED[1,2] = "*<" THEN RESTRICTED = "RESTRICTED"
+
+      READ DELIV.MAN.PARAMS.REC FROM SY.PARAMS.FV, "DELIVERY.MANAGEMENT.PARAMS" ELSE
+         DELIV.MAN.PARAMS.REC = ""
+      END
+
+      BMX.REQ.VEHICLE.TYPE = DELIV.MAN.PARAMS.REC<37>
+      BMX.STD.SERVICE.LEVEL = DELIV.MAN.PARAMS.REC<41, 1>
+      BMX.PREM.SERVICE.LEVEL = DELIV.MAN.PARAMS.REC<41, 2>
+      NON.BMX.STD.SERVICE.LEVEL = DELIV.MAN.PARAMS.REC<48, 2>
+      NON.BMX.PREM.SERVICE.LEVEL = DELIV.MAN.PARAMS.REC<48, 1>
+
+      BMX.ORDER = @FALSE
+
+      READ PRODUCT.PROVENANCE.REC FROM SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC" ELSE
+         PRODUCT.PROVENANCE.REC = ""
+      END
+
+      CUSTOMER.LIST = PRODUCT.PROVENANCE.REC<1>
+      POST.CODE.LIST = PRODUCT.PROVENANCE.REC<2>
+      BRANCH.BRAND.LIST = PRODUCT.PROVENANCE.REC<6>
+
+      RETURN
+
+**************************************************************************
+BUILD.JOB.DATA:
+***************
+
+      JOB.DELIVERY.COST.CENTRE = FIELD(DELIVERY.ID, "*", 4)
+      JOB.SALES.COST.CENTRE = OH.NATIONAL.CREATOR<1,1>
+      IF JOB.SALES.COST.CENTRE = "" THEN
+         JOB.SALES.COST.CENTRE = BRANCH.CODE
+      END
+      JOB.SALES.ORDER.NUMBER = ORDER.NUMBER.FULL :"*": VERSION
+      JOB.SALES.ORDER.KEY = DELIVERY.ID
+
+      IF EPOD.PER.TKT.SIG = "Y" THEN
+         JOB.EPOD.PER.TKT.SIG = @TRUE
+      END ELSE
+         JOB.EPOD.PER.TKT.SIG = @FALSE
+      END
+
+      GOSUB BUILD.CUSTOMER.DATA
+
+      GOSUB BUILD.DESTINATION.DATA
+      GOSUB CHECK.POC
+
+      IF ERROR.MESSAGE = "" THEN
+         GOSUB BUILD.REST.OF.JOB.DATA
+         GOSUB SORT.JOB.DATA
+      END
+      RETURN
+
+*****************************************************************************
+SORT.JOB.DATA:
+**************
+
+      IF JOB.DATA THEN
+         LINE.COUNT = DCOUNT(JOB.LINE.DESCRIPTION,@VM)
+         SAVE.JOB.DATA = JOB.DATA
+         FOR LINE.IDX = 52 TO 64
+            JOB.DATA<LINE.IDX> = ""
+         NEXT LINE.IDX
+         JOB.DATA<77> = ""
+
+         *ADD RESTRICTED PRODUCTS FIRST
+
+         NEXT.LINE = 0
+         FOR LINE.IDX = 1 TO LINE.COUNT
+            IF SAVE.JOB.DATA<59, LINE.IDX>[1,LEN(RESTRICTED)] = RESTRICTED THEN
+               NEXT.LINE += 1
+               FOR JOB.LINE.IDX = 52 TO 64
+                  JOB.DATA<JOB.LINE.IDX, NEXT.LINE> = SAVE.JOB.DATA<JOB.LINE.IDX, LINE.IDX>
+               NEXT JOB.LINE.IDX
+               JOB.DATA<77, NEXT.LINE> = @TRUE
+            END
+         NEXT LINE.IDX
+
+         *NOW ADD NON RESTRICTED PRODUCTS
+         FOR LINE.IDX = 1 TO LINE.COUNT
+            IF SAVE.JOB.DATA<59, LINE.IDX>[1,LEN(RESTRICTED)] # RESTRICTED THEN
+               NEXT.LINE += 1
+               FOR JOB.LINE.IDX = 52 TO 64
+                  JOB.DATA<JOB.LINE.IDX, NEXT.LINE> = SAVE.JOB.DATA<JOB.LINE.IDX, LINE.IDX>
+               NEXT JOB.LINE.IDX
+               JOB.DATA<77, NEXT.LINE> = @FALSE
+            END
+         NEXT LINE.IDX
+      END
+
+      RETURN
+
+**************************************************************************
+BUILD.REST.OF.JOB.DATA:
+***********************
+
+      GOSUB BUILD.WINDOW.DATA
+
+      JOB.GROUP.ID = ""
+      JOB.SEQUENCE.IN.GROUP = 0
+
+      BANNED.VEHICLE.TYPE = BAN.VEHICLE
+      MAX.VEHICLE.TYPE = BAN.VEHICLE.MAX
+
+      IF ORDER.TYPE = "M" THEN
+         GOSUB CHECK.IBT.BMX.ORDER
+      END ELSE
+         GOSUB CHECK.TICKET.BMX.ORDER
+      END
+
+      RQD.VEHICLE.TYPE = REQ.VEHICLE
+
+      CALL DELIV.MAN.GET.INSTRUCTIONS(DELIV.INST.1, DELIV.INST.2,
+         BANNED.VEHICLE.TYPE, MAX.VEHICLE.TYPE,
+         RQD.VEHICLE.TYPE, REQ.VEHICLE.REG, DELIVERY.SLOT,
+         INSTRUCTIONS, SPECIAL.CONDITIONS,
+         OUT.ERROR.MESSAGE)
+
+      JOB.INSTRUCTIONS = INSTRUCTIONS
+      JOB.INDICATORS.SPECIAL.CONDITIONS = SPECIAL.CONDITIONS
+      JOB.VEHICLE.RESTRICTIONS = ""
+      JOB.PRIORITY = 0
+
+      JOB.INDICATORS.KNOWN.HAZARDS = @FALSE
+
+      NUMBER.OF.INDS = DCOUNT(HEALTH.SAFETY.INDS, @VM)
+      FOR IND.COUNT = 1 TO NUMBER.OF.INDS
+         IF HEALTH.SAFETY.INDS<1,IND.COUNT> = "Y" THEN
+            JOB.INDICATORS.KNOWN.HAZARDS = @TRUE
+         END
+      NEXT IND.COUNT
+
+      JOB.NOTES = ""
+      NUMBER.OF.NOTES = DCOUNT(HEALTH.SAFETY.DETS, @VM)
+      FOR NOTE.COUNT = 1 TO NUMBER.OF.NOTES
+         IF HEALTH.SAFETY.DETS<1, NOTE.COUNT, 1> # "" THEN
+            IF JOB.NOTES = "" THEN
+               JOB.NOTES = CHANGE(HEALTH.SAFETY.DETS<1, NOTE.COUNT>, @SVM, " ")
+            END ELSE
+               JOB.NOTES := @VM: CHANGE(HEALTH.SAFETY.DETS<1, NOTE.COUNT>, @SVM, " ")
+            END
+         END
+      NEXT NOTE.COUNT
+
+      IF JOB.NOTES # "" THEN
+         JOB.INDICATORS.KNOWN.HAZARDS = @TRUE
+      END
+
+      JOB.SALES.CONTACT = ""
+      IF OH.NATIONAL.CREATOR<1,2> # "" THEN
+         JOB.SALES.CONTACT = OH.NATIONAL.CREATOR<1,2>
+      END ELSE
+         JOB.SALES.CONTACT = AUTH.ID
+      END
+
+      BEGIN CASE
+         CASE ORDER.TYPE = "B"
+            JOB.PAYMENT.METHOD = "CASH DELIVERED"
+         CASE ORDER.TYPE = "F"
+            JOB.PAYMENT.METHOD = "ACCOUNT DELIVERED"
+         CASE 1
+            JOB.PAYMENT.METHOD = "IBT"
+      END CASE
+
+      JOB.CUSTOMER.ORDER.REF = TRIM(OH.CT.ORD.NO)
+
+      GOSUB SET.BMX.ATTRIBUTES
+
+      GOSUB BUILD.LINES.DATA
+
+      GOSUB BUILD.OUTSTANDING.DATA
+
+      RETURN
+
+**************************************************************************
+BUILD.CUSTOMER.DATA:
+********************
+
+      JOB.CUST.ACCOUNT.ID = TRIM(CUST.CODE)
+      JOB.CUST.TITLE = ""
+      JOB.CUST.INITIALS = ""
+      JOB.CUST.FIRST.NAME = TRIM(CUST.NAME)
+      JOB.CUST.LAST.NAME = ""
+
+      JOB.CUST.HOME.PHONE = OH.CUST.TEL
+      JOB.CUST.MOBILE.PHONE = ""
+      JOB.CUST.WORK.PHONE = ""
+      JOB.CONTACT.SMS = ""
+
+      IF MOBILE.PHONE # "" THEN
+         IF MOBILE.SMS = "Y" THEN
+            JOB.CUST.MOBILE.PHONE = MOBILE.PHONE
+            JOB.CONTACT.SMS = MOBILE.NAME
+            JOB.CUST.WORK.PHONE = MOBILE.PHONE2
+         END ELSE
+            JOB.CUST.WORK.PHONE = MOBILE.PHONE
+            IF MOBILE.SMS2 = "Y" THEN
+               JOB.CUST.MOBILE.PHONE = MOBILE.PHONE2
+               JOB.CONTACT.SMS = MOBILE.NAME2
+            END
+         END
+      END ELSE
+         IF MOBILE.SMS2 = "Y" THEN
+            JOB.CUST.MOBILE.PHONE = MOBILE.PHONE2
+            JOB.CONTACT.SMS = MOBILE.NAME2
+         END ELSE
+            JOB.CUST.WORK.PHONE = MOBILE.PHONE2
+         END
+      END
+
+      JOB.CUST.EPOD.EMAIL = ""
+      IF EPOD.EMAIL # "" THEN
+         JOB.CUST.EPOD.EMAIL = EPOD.EMAIL
+      END ELSE
+         IF EMAIL.ADDRESS # "" THEN
+            JOB.CUST.EPOD.EMAIL = EMAIL.ADDRESS
+         END
+      END
+      IF ORDER.TYPE = "M" THEN
+         READV MAILBOX FROM BRN.DETAIL.FV, CUST.CODE, 56 THEN
+            READV DOMAIN FROM BRN.DETAIL.FV, CUST.CODE, 80 THEN
+               IF MAILBOX # "" AND DOMAIN # "" THEN
+                  IF JOB.CUST.EPOD.EMAIL = "" THEN
+                     JOB.CUST.EPOD.EMAIL = MAILBOX : DOMAIN
+                  END ELSE
+                     JOB.CUST.EPOD.EMAIL := @VM : MAILBOX : DOMAIN
+                  END
+               END
+            END
+         END
+      END ELSE
+         READV HO.CUSTOMER.POD.EMAIL FROM HO.CUSTOMER.FV, CUST.CODE, 126 THEN
+            IF HO.CUSTOMER.POD.EMAIL # "" THEN
+               IF JOB.CUST.EPOD.EMAIL = "" THEN
+                  JOB.CUST.EPOD.EMAIL = HO.CUSTOMER.POD.EMAIL
+               END ELSE
+                  JOB.CUST.EPOD.EMAIL := @VM : HO.CUSTOMER.POD.EMAIL
+               END
+            END
+         END
+      END
+
+      JOB.CUST.CONTACT.NAME = TRIM(OH.CUST.NAME)
+      JOB.CUST.ACCOUNT.ADDR.NUMBER = ""
+      JOB.CUST.ACCOUNT.ADDR.NAME = ""
+      JOB.CUST.ACCOUNT.ADDR.LINE1 = TRIM(CUST.ADDR.1)
+      JOB.CUST.ACCOUNT.ADDR.LINE2 = TRIM(CUST.ADDR.2)
+      JOB.CUST.ACCOUNT.ADDR.LINE3 = TRIM(CUST.ADDR.3)
+      JOB.CUST.ACCOUNT.ADDR.LINE4 = TRIM(CUST.ADDR.4)
+
+      CUST.ADDRESS = CUST.ADDR.1 :@AM: CUST.ADDR.2 :@AM: CUST.ADDR.3 :@AM: CUST.ADDR.4
+      CUST.POSTCODE = ""
+      IF CUST.ADDRESS # "":@AM:"":@AM:"":@AM:"" THEN
+         CALL BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS(CUST.ADDRESS, "FULL", @FALSE, CUST.POSTCODE, "", "", "", "", "", "")
+      END
+      JOB.CUST.ACCOUNT.ADDR.POSTCODE = CUST.POSTCODE
+
+      IF JOB.CUST.ACCOUNT.ADDR.LINE1 # "" THEN
+         JOB.CUST.ACCOUNT.ADDR.COUNTRY = "GB"
+      END
+
+      ORDER.DATE = OCONV(OH.ORD.DATE, "D4/")
+      JOB.ORDER.DATE = ORDER.DATE[7,4] : ORDER.DATE[4,2] : ORDER.DATE[1,2]
+
+
+      RETURN
+
+**************************************************************************
+CHECK.POC:
+**********
+
+      POC.FLAG = @FALSE
+      CUST.FLAG = @FALSE
+      POST.CODE.FLAG = @FALSE
+      BRANCH.FLAG = @FALSE
+
+      NO.CUSTOMERS = DCOUNT(CUSTOMER.LIST,@VM)
+      FOR CNT = 1 TO NO.CUSTOMERS
+         IF JOB.CUST.ACCOUNT.ID = CUSTOMER.LIST<1, CNT> THEN
+            CUST.FLAG = @TRUE
+         END
+      NEXT CNT
+
+      NO.POST.CODES = DCOUNT(POST.CODE.LIST,@VM)
+      FOR CNT = 1 TO NO.POST.CODES
+         IF POST.CODE.LIST<1, CNT> = JOB.DESTINATION.ADDR.POSTCODE[1,LEN(POST.CODE.LIST<1,CNT>)] THEN
+            POST.CODE.FLAG = @TRUE
+         END
+      NEXT CNT
+
+      NO.BRANCH.BRAND = DCOUNT(BRANCH.BRAND.LIST,@VM)
+      FOR CNT = 1 TO NO.BRANCH.BRAND
+         IF BRANCH.BRAND.LIST<1, CNT> = BRANCH.BRAND THEN
+            BRANCH.FLAG = @TRUE
+         END
+      NEXT CNT
+
+      IF POST.CODE.FLAG AND CUST.FLAG AND BRANCH.FLAG THEN
+         POC.FLAG = @TRUE
+      END
+
+      RETURN
+
+**************************************************************************
+BUILD.DESTINATION.DATA:
+***********************
+
+      JOB.DESTINATION.ADDR.NUMBER = ""
+      JOB.DESTINATION.ADDR.NAME = ""
+
+      DELIV.POSTCODE = ""
+      IF OH.DELIV.ALT.ADDRESS<1,1> # "" THEN
+         JOB.DESTINATION.ADDR.LINE1 = OH.DELIV.ALT.ADDRESS<1,1>
+         JOB.DESTINATION.ADDR.LINE2 = OH.DELIV.ALT.ADDRESS<1,2>
+         JOB.DESTINATION.ADDR.LINE3 = OH.DELIV.ALT.ADDRESS<1,3>
+         JOB.DESTINATION.ADDR.LINE4 = OH.DELIV.ALT.ADDRESS<1,4>
+         DELIV.ADDRESS = OH.DELIV.ALT.ADDRESS<1,1> :@AM: OH.DELIV.ALT.ADDRESS<1,2> :@AM: OH.DELIV.ALT.ADDRESS<1,3>
+         DELIV.ADDRESS := @AM : OH.DELIV.ALT.ADDRESS<1,4> :@AM: OH.DELIV.ALT.ADDRESS<1,5>
+      END ELSE
+         JOB.DESTINATION.ADDR.LINE1 = DELIV.ADDR.1
+         JOB.DESTINATION.ADDR.LINE2 = DELIV.ADDR.2
+         JOB.DESTINATION.ADDR.LINE3 = DELIV.ADDR.3
+         JOB.DESTINATION.ADDR.LINE4 = DELIV.ADDR.4
+         DELIV.ADDRESS = DELIV.ADDR.1 :@AM: DELIV.ADDR.2 :@AM: DELIV.ADDR.3 :@AM: DELIV.ADDR.4
+      END
+      CALL BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS(DELIV.ADDRESS, "FULL", @FALSE, DELIV.POSTCODE, "", "", "", "", "", "")
+      JOB.DESTINATION.ADDR.POSTCODE = DELIV.POSTCODE
+
+      JOB.DESTINATION.ADDR.COUNTRY = "GB"
+
+      JOB.DESTINATION.ID = OETC.DM.GROUP.PARENT.KNOWN.LOCATION
+      IF NOT(JOB.DESTINATION.ID) THEN
+         CALL DELIV.MAN.GENERATE.ADDRESS.HASH(JOB.DESTINATION.ADDR.LINE1, JOB.DESTINATION.ADDR.LINE2, JOB.DESTINATION.ADDR.LINE3,
+            JOB.DESTINATION.ADDR.LINE4, JOB.DESTINATION.ADDR.POSTCODE, JOB.DESTINATION.ADDR.COUNTRY, ADDRESS.HASH, ERROR.MESSAGE)
+         IF ERROR.MESSAGE = "" THEN
+            JOB.DESTINATION.ID = ADDRESS.HASH
+         END ELSE
+            JOB.DATA = ""
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+BUILD.WINDOW.DATA:
+******************
+
+      REQUESTED.DELIVERY.DATE = DELIVERY.DATE"DY" : DELIVERY.DATE "DM""R%2" : DELIVERY.DATE"DD""R%2"
+
+      JOB.WINDOW.EARLIEST.DATE = REQUESTED.DELIVERY.DATE
+
+      FROM.TIME = 0
+      IF DELIVERY.SLOT # "" THEN
+         READV FROM.TIME FROM BS.DELIVERY.SLOTS.FV, DELIVERY.SLOT, 2 THEN
+         END
+      END
+      IF NOT.BEFORE # "" AND NOT.BEFORE > FROM.TIME THEN
+         FROM.TIME = NOT.BEFORE
+      END
+      JOB.WINDOW.EARLIEST.TIME = FROM.TIME "MT"
+      JOB.WINDOW.EARLIEST.TIME = JOB.WINDOW.EARLIEST.TIME[1,2] : JOB.WINDOW.EARLIEST.TIME[4,2]
+
+      JOB.WINDOW.LATEST.DATE = REQUESTED.DELIVERY.DATE
+      TO.TIME = 86340
+      IF DELIVERY.SLOT # "" THEN
+         READV SLOT.TO.TIME FROM BS.DELIVERY.SLOTS.FV, DELIVERY.SLOT, 3 THEN
+            IF SLOT.TO.TIME > FROM.TIME THEN
+               TO.TIME = SLOT.TO.TIME
+            END
+         END
+      END
+      IF NOT.AFTER # "" AND NOT.AFTER < TO.TIME THEN
+         IF NOT.AFTER > FROM.TIME THEN
+            TO.TIME = NOT.AFTER
+         END
+      END
+      JOB.WINDOW.LATEST.TIME = TO.TIME "MT"
+      JOB.WINDOW.LATEST.TIME = JOB.WINDOW.LATEST.TIME[1,2] : JOB.WINDOW.LATEST.TIME[4,2]
+
+      IF NOT.BETWEEN.START # "" THEN
+         JOB.WINDOW.EXCLUSION.START.DATE = REQUESTED.DELIVERY.DATE
+         JOB.WINDOW.EXCLUSION.END.DATE = REQUESTED.DELIVERY.DATE
+         JOB.WINDOW.EXCLUSION.START.TIME = NOT.BETWEEN.START "MT"
+         JOB.WINDOW.EXCLUSION.START.TIME = JOB.WINDOW.EXCLUSION.START.TIME[1,2] : JOB.WINDOW.EXCLUSION.START.TIME[4,2]
+         JOB.WINDOW.EXCLUSION.END.TIME = NOT.BETWEEN.END "MT"
+         JOB.WINDOW.EXCLUSION.END.TIME = JOB.WINDOW.EXCLUSION.END.TIME[1,2] : JOB.WINDOW.EXCLUSION.END.TIME[4,2]
+      END
+
+      IF TIP.TIME # "" THEN
+         JOB.MINUTES.ALLOWED.FOR.DELIVERY = TIP.TIME / 60
+      END ELSE
+         JOB.MINUTES.ALLOWED.FOR.DELIVERY = 0
+      END
+
+      RETURN
+
+**************************************************************************
+CHECK.TICKET.BMX.ORDER:
+***********************
+
+      IF OH.SHOWROOM.SALE = "Y" THEN
+         CALL GET.ORDER.BRAND("Y", "", BRAND, BRANCH.CODE, "", "", "", "", "")
+         IF BRAND = "BMX" THEN
+            BMX.ORDER = @TRUE
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+CHECK.IBT.BMX.ORDER:
+********************
+
+      SHOWROOM.FLAG = ""
+      BEGIN CASE
+         CASE LEN(OH.CT.ORD.NO) = 9
+            PO.BRN = OH.CT.ORD.NO[1,4]
+            PO.NUM = OH.CT.ORD.NO[5,5]
+            GOSUB CHECK.IBT.PO.BMX.ORDER
+         CASE LEN(OH.CT.ORD.NO) = 6
+            GOSUB CHECK.IBT.TICKET.BMX.ORDER
+         CASE LEN(OH.CT.ORD.NO) = 5 AND LEN(CUST.CODE) = 4
+            PO.BRN = CUST.CODE
+            PO.NUM = OH.CT.ORD.NO
+            GOSUB CHECK.IBT.PO.BMX.ORDER
+         CASE OH.PO.NO # "" AND LEN(CUST.CODE) = 4
+            PO.BRN = CUST.CODE
+            PO.NUM = OH.PO.NO
+            GOSUB CHECK.IBT.PO.BMX.ORDER
+      END CASE
+
+      RETURN
+
+**************************************************************************
+CHECK.IBT.PO.BMX.ORDER:
+***********************
+
+      READV PO.MACHINE FROM BRN.DETAIL.FV, PO.BRN, 17 ELSE
+         PO.MACHINE = ""
+      END
+      READV BRN.MACHINE FROM BRN.DETAIL.FV, BRANCH.CODE, 17 ELSE
+         BRN.MACHINE = ""
+      END
+
+      IF BRN.MACHINE = PO.MACHINE THEN
+         PH.FV = PO.HEADER.FV
+         PL.FV = PO.LINE.FV
+         GOSUB CHECK.PO.LINES.FOR.BMX.ORDER
+      END ELSE
+         ACTION = "CREATE"
+         MACHINE = PO.MACHINE
+         ACCOUNT = "STOCK"
+         FILENAME = "PO-HEADER"
+         GOSUB CALL.CREATE.TEMP.QPOINTER
+         IF ERR.MSG = "" THEN
+            POH.QPOINTER = QPOINTER
+            OPEN POH.QPOINTER TO QPOINTER.PO.HEADER.FV THEN
+               FILENAME = "PO-LINE"
+               GOSUB CALL.CREATE.TEMP.QPOINTER
+               IF ERR.MSG = "" THEN
+                  POL.QPOINTER = QPOINTER
+                  OPEN POL.QPOINTER TO QPOINTER.PO.LINE.FV THEN
+                     PH.FV = QPOINTER.PO.HEADER.FV
+                     PL.FV = QPOINTER.PO.LINE.FV
+                     GOSUB CHECK.PO.LINES.FOR.BMX.ORDER
+                     CLOSE QPOINTER.PO.LINE.FV
+                  END
+                  ACTION = "DELETE"
+                  QPOINTER = POL.QPOINTER
+                  GOSUB CALL.CREATE.TEMP.QPOINTER
+               END
+               CLOSE QPOINTER.PO.HEADER.FV
+            END
+            ACTION = "DELETE"
+            QPOINTER = POH.QPOINTER
+            GOSUB CALL.CREATE.TEMP.QPOINTER
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+CHECK.IBT.TICKET.BMX.ORDER:
+***************************
+
+      SHOWROOM.FLAG = ""
+      ORDER.BRANCH = CUST.CODE
+      ORD.HEAD.KEY = OH.CT.ORD.NO[6,1] : OH.CT.ORD.NO[1,1] : ORDER.BRANCH : OH.CT.ORD.NO[2,4]
+      IF ORDER.BRANCH = BRANCH.CODE THEN
+         READV SHOWROOM.FLAG FROM ORDER.HEADER.FV, ORD.HEAD.KEY, 176 ELSE NULL
+      END ELSE
+         READV ORDER.MACHINE FROM BRN.DETAIL.FV, ORDER.BRANCH, 17 ELSE
+            ORDER.MACHINE = ""
+         END
+         READV ORDER.ACCOUNT FROM BRN.DETAIL.FV, ORDER.BRANCH, 16 ELSE
+            ORDER.ACCOUNT = ""
+         END
+
+         ACTION = "CREATE"
+         MACHINE = ORDER.MACHINE
+         ACCOUNT = ORDER.ACCOUNT
+         FILENAME = "ORDER-HEADER"
+         GOSUB CALL.CREATE.TEMP.QPOINTER
+
+         IF ERR.MSG = "" THEN
+            OPEN QPOINTER TO TICKET.ORDER.HEADER.FV THEN
+               READV SHOWROOM.FLAG FROM TICKET.ORDER.HEADER.FV, ORD.HEAD.KEY, 176 ELSE NULL
+               CLOSE TICKET.ORDER.HEADER.FV
+            END
+            ACTION = "DELETE"
+            GOSUB CALL.CREATE.TEMP.QPOINTER
+         END
+      END
+
+      GOSUB CHECK.IF.BMX.ORDER
+
+      RETURN
+
+**************************************************************************
+CHECK.PO.LINES.FOR.BMX.ORDER:
+*****************************
+
+      PO.HEADER.KEY = PO.BRN : "*" : PO.NUM
+      READV PH.LINES FROM PH.FV, PO.HEADER.KEY, 1 THEN
+         FOR PO.LINE.COUNT = 1 TO PH.LINES UNTIL BMX.ORDER
+            PO.LINE.KEY = PO.LINE.COUNT "R%3" :"*": PO.HEADER.KEY
+            READV POL.ORDER.NO FROM PL.FV, PO.LINE.KEY, 14 THEN
+               IF POL.ORDER.NO # "" THEN
+                  IF INDEX(POL.ORDER.NO, "|", 1) THEN
+                     GOSUB GET.DOC.HIST.SHOWROOM.FLAG
+                  END ELSE
+                     GOSUB GET.ORDER.SHOWROOM.FLAG
+                  END
+                  GOSUB CHECK.IF.BMX.ORDER
+               END
+            END
+         NEXT PO.LINE.COUNT
+      END
+
+      RETURN
+
+**************************************************************************
+GET.DOC.HIST.SHOWROOM.FLAG:
+***************************
+
+      ORDER.BRANCH = FIELD(POL.ORDER.NO, "|", 2)
+      DOC.HIST.ID = FIELD(POL.ORDER.NO, "|", 1, 4)
+      DOC.HIST.FILE = 'DOCUMENT-HISTORY-' : DOC.HIST.ID[1,4]
+      IF BRN.MACHINE = PO.MACHINE THEN
+         OPEN DOC.HIST.FILE TO DOCUMENT.HISTORY.FV THEN
+            READV SHOWROOM.FLAG FROM DOCUMENT.HISTORY.FV, DOC.HIST.ID, 206 ELSE NULL
+            CLOSE DOCUMENT.HISTORY.FV
+         END
+      END ELSE
+         ACTION = "CREATE"
+         MACHINE = PO.MACHINE
+         ACCOUNT = "EODGROUP"
+         FILENAME = DOC.HIST.FILE
+         GOSUB CALL.CREATE.TEMP.QPOINTER
+
+         IF ERR.MSG = "" THEN
+            OPEN QPOINTER TO DOCUMENT.HISTORY.FV THEN
+               READV SHOWROOM.FLAG FROM DOCUMENT.HISTORY.FV, DOC.HIST.ID, 206 ELSE NULL
+               CLOSE DOCUMENT.HISTORY.FV
+            END
+            ACTION = "DELETE"
+            GOSUB CALL.CREATE.TEMP.QPOINTER
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+GET.ORDER.SHOWROOM.FLAG:
+************************
+
+      ORDER.BRANCH = POL.ORDER.NO[6,4]
+      ORDER.HEADER.KEY = POL.ORDER.NO[4,10]
+      IF ORDER.BRANCH = BRANCH.CODE THEN
+         READV SHOWROOM.FLAG FROM ORDER.HEADER.FV, ORDER.HEADER.KEY, 176 ELSE NULL
+      END ELSE
+         READV ORDER.MACHINE FROM BRN.DETAIL.FV, ORDER.BRANCH, 17 ELSE
+            ORDER.MACHINE = ""
+         END
+         READV ORDER.ACCOUNT FROM BRN.DETAIL.FV, ORDER.BRANCH, 16 ELSE
+            ORDER.ACCOUNT = ""
+         END
+
+         ACTION = "CREATE"
+         MACHINE = ORDER.MACHINE
+         ACCOUNT = ORDER.ACCOUNT
+         FILENAME = "ORDER-HEADER"
+         GOSUB CALL.CREATE.TEMP.QPOINTER
+
+         IF ERR.MSG = "" THEN
+            OPEN QPOINTER TO TICKET.ORDER.HEADER.FV THEN
+               READV SHOWROOM.FLAG FROM TICKET.ORDER.HEADER.FV, ORDER.HEADER.KEY, 176 ELSE NULL
+               CLOSE TICKET.ORDER.HEADER.FV
+            END
+            ACTION = "DELETE"
+            GOSUB CALL.CREATE.TEMP.QPOINTER
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+CALL.CREATE.TEMP.QPOINTER:
+**************************
+
+      ERR.MSG = ""
+      IF ACTION = "CREATE" THEN
+         QPOINTER = ""
+      END
+
+      CALL CREATE.TEMP.QPOINTER(ACTION, MACHINE, ACCOUNT, FILENAME, QPOINTER, ERR.MSG)
+
+      RETURN
+
+**************************************************************************
+CHECK.IF.BMX.ORDER:
+*******************
+
+      IF SHOWROOM.FLAG = "Y" THEN
+         CALL GET.ORDER.BRAND("Y", "", ORDER.BRAND, ORDER.BRANCH, "", "", "", "", "")
+         IF ORDER.BRAND = "BMX" THEN
+            BMX.ORDER = @TRUE
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+BUILD.LINES.DATA:
+*****************
+
+      LINE.COUNT = 0
+      FOR ORDER.LINE.COUNT = 1 TO NO.OF.LINES
+         LOCATE ORDER.LINE.COUNT IN ARRAY.OF.VALID.LINE.NBRS<SPLIT.NUMBER> SETTING FIRE THEN
+            ORDER.LINE.KEY = ORDER.LINE.COUNT "R%3" : ORDER.HEADER.KEY
+            MATPARSE ORDER.LINE.REC FROM RAISE(OETC.LINE.ARRAY<ORDER.LINE.COUNT>)
+            GOSUB PROCESS.ORDER.LINE
+         END
+      NEXT ORDER.LINE.COUNT
+      GOSUB SET.JOB.LINES.DATA
+
+      RETURN
+
+**************************************************************************
+PROCESS.ORDER.LINE:
+*******************
+
+      NUM.TAKEN = DCOUNT(OL.DATE.TAKEN, @VM) + 0
+      DM.ORD.QTY = OL.ORD.QTY + 0
+      IF SPLIT.NUMBER > 0 THEN
+         IF SPLIT.NUMBER <= NUM.TAKEN THEN
+            DM.ORD.QTY = OL.QUANTITY.TAKEN<1, SPLIT.NUMBER> + 0
+         END ELSE
+            FOR SN = 1 TO SPLIT.NUMBER - 1
+               DM.ORD.QTY = DM.ORD.QTY - OL.QUANTITY.TAKEN<1, SN> + 0
+            NEXT SN
+         END
+      END
+      IF DM.ORD.QTY # 0 THEN
+         MATREAD PF.MCP.PRODUCT.REC FROM PF.MCP.PRODUCTS.FV, OL.PROD.CODE THEN
+            GOSUB BUILD.MCP.DATA
+         END ELSE
+            GOSUB BUILD.LINE.DATA
+            IF POC.FLAG THEN
+               GOSUB CHECK.SCAN.COUNT
+            END
+            IF LINE.SCAN.COUNT<1, LINE.COUNT> = '' THEN
+               LINE.SCAN.COUNT<1, LINE.COUNT> = 0
+            END
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+BUILD.OUTSTANDING.DATA:
+***********************
+
+      TO.FOLLOW.LIST = ""
+      ARRAY.OF.VALID.LINE.NBRS.TO.PASS = ""
+      WRK.NOAT = DCOUNT(ARRAY.OF.VALID.LINE.NBRS, @AM)
+      FOR SN = 1 TO WRK.NOAT
+         WRK.NOMV = DCOUNT(ARRAY.OF.VALID.LINE.NBRS<SN>, @VM)
+         FOR LINE.IDX = 1 TO WRK.NOMV
+            LOCATE ARRAY.OF.VALID.LINE.NBRS<SN, LINE.IDX> IN ARRAY.OF.VALID.LINE.NBRS.TO.PASS SETTING POS ELSE
+               ARRAY.OF.VALID.LINE.NBRS.TO.PASS<-1> = ARRAY.OF.VALID.LINE.NBRS<SN, LINE.IDX>
+            END
+         NEXT LINE.IDX
+      NEXT SN
+
+      CALL DELIV.MAN.GET.BALANCE.TO.FOLLOW(DELIVERY.ID, TO.FOLLOW.LIST, ERROR.MESSAGE, PASSED.ORDER.HEADER.FV, PASSED.ORDER.LINE.FV, MODE, ARRAY.OF.VALID.LINE.NBRS.TO.PASS)
+      IF ERROR.MESSAGE = "" THEN
+         JOB.ITEMS.OUTSTANDING.CODE = TO.FOLLOW.LIST<1>
+         JOB.ITEMS.OUTSTANDING.DESCRIPTION = TO.FOLLOW.LIST<2>
+         JOB.ITEMS.OUTSTANDING.QUANTITY = TO.FOLLOW.LIST<3>
+         JOB.ITEMS.OUTSTANDING.UOM = TO.FOLLOW.LIST<4>
+      END ELSE
+         JOB.DATA = ""
+      END
+
+      RETURN
+
+**************************************************************************
+BUILD.MCP.DATA:
+***************
+
+      GOSUB GET.COFC.TYPE
+
+      FOR COMPONENT.COUNT = 1 TO PF.MCP.NO.OF.PRODUCTS
+
+         LINE.COUNT += 1
+         LINE.DISPLAY.NUMBER<1, LINE.COUNT> = ORDER.LINE.COUNT : "." : COMPONENT.COUNT "R%2"
+         LINE.ORIGINATOR.KEY<1, LINE.COUNT> = DELIVERY.ID :"*": PF.MCP.PROD.CODES<1, COMPONENT.COUNT> :"*": ORDER.LINE.KEY[1,3] :"*": COMPONENT.COUNT "R%2"
+         LINE.DELIVERY.OR.COLLECTION<1, LINE.COUNT> = "DELIVERY"
+         LINE.PRODUCT.CODE<1, LINE.COUNT> = PF.MCP.PROD.CODES<1, COMPONENT.COUNT>
+         LINE.BARCODE<1, LINE.COUNT> = PF.MCP.PROD.CODES<1, COMPONENT.COUNT>
+         LINE.QUANTITY<1, LINE.COUNT> = DM.ORD.QTY * PF.MCP.QTYS<1, COMPONENT.COUNT>
+         LINE.UOM<1, LINE.COUNT> = ""
+         LINE.DESCRIPTION<1, LINE.COUNT> = ""
+         LINE.INDICATOR<1, LINE.COUNT> = ""
+         LINE.WEIGHT<1, LINE.COUNT> = 0
+         LINE.LENGTH<1, LINE.COUNT> = 0
+         LINE.DEPTH<1, LINE.COUNT> = 0
+         LINE.WIDTH<1, LINE.COUNT> = 0
+
+         IF COFC.TYPE # "" THEN
+            LINE.INDICATOR<1, LINE.COUNT> = COFC.TYPE
+         END
+
+         MATREAD PF.PRODUCT.MASTER.REC FROM PF.PRODUCT.MASTER.FV, PF.MCP.PROD.CODES<1, COMPONENT.COUNT> THEN
+            GOSUB POPULATE.FIELDS.FROM.PROD.MASTER
+            LINE.UOM<1, LINE.COUNT> = PF.MST.STOCK.UOM
+            IF PF.MST.WEIGHT > 0 THEN
+               LINE.WEIGHT<1, LINE.COUNT> = PF.MST.WEIGHT
+            END
+            VOLUME.FOR.UOM.IN.LITRES.X.10K = PF.MST.SINGLE.LITRES
+            UOM.FOR.LITRES.VALUE = PF.MST.SINGLE.UOM
+            UOM.FOR.DIMENSIONS = PF.MST.STOCK.UOM
+            GOSUB POPULATE.DIMENSIONS
+         END
+
+      NEXT COMPONENT.COUNT
+
+      RETURN
+
+**************************************************************************
+BUILD.LINE.DATA:
+****************
+
+      GOSUB GET.COFC.TYPE
+
+      LINE.COUNT += 1
+* displayLineNumber in JSON deliveryNoteLineNumber in mapping
+      LINE.DISPLAY.NUMBER<1, LINE.COUNT> = ORDER.LINE.COUNT
+      LINE.DELIVERY.OR.COLLECTION<1, LINE.COUNT> = "DELIVERY"
+      LINE.LENGTH<1, LINE.COUNT> = 0
+      LINE.WIDTH<1, LINE.COUNT> = 0
+      LINE.DEPTH<1, LINE.COUNT> = 0
+
+      LINE.INDICATOR<1, LINE.COUNT> = ""
+      IF COFC.TYPE # "" THEN
+         LINE.INDICATOR<1, LINE.COUNT> = COFC.TYPE
+      END
+
+      IF OL.ORD.MAN.IND = "M" THEN
+         LINE.PRODUCT.CODE<1, LINE.COUNT> = OL.PROD.GP.CODE
+         LINE.BARCODE<1, LINE.COUNT> = ORDER.LINE.KEY[1,3] : JOB.SALES.ORDER.NUMBER
+         LINE.DESCRIPTION<1, LINE.COUNT> = OL.ORD.MAN.DESC
+      END ELSE
+         LINE.PRODUCT.CODE<1, LINE.COUNT> = OL.PROD.CODE
+         LINE.BARCODE<1, LINE.COUNT> = OL.PROD.CODE
+         LINE.DESCRIPTION<1, LINE.COUNT> = ""
+         MATREAD PF.PRODUCT.MASTER.REC FROM PF.PRODUCT.MASTER.FV, OL.PROD.CODE THEN
+            GOSUB POPULATE.FIELDS.FROM.PROD.MASTER
+            IF OL.ADJUSTED.QTYUNIT.VOLUME.IN.M3.X.10K = "" AND DELIV.MAN.BRAND.SEND.VOLUME = @TRUE THEN
+               VOLUME.FOR.UOM.IN.LITRES.X.10K = PF.MST.SINGLE.LITRES
+               UOM.FOR.LITRES.VALUE = PF.MST.SINGLE.UOM
+               UOM.FOR.DIMENSIONS = OL.ORD.QTY.UOM
+               GOSUB POPULATE.DIMENSIONS
+            END
+         END
+      END
+
+      LINE.ORIGINATOR.KEY<1, LINE.COUNT> = DELIVERY.ID :"*": LINE.PRODUCT.CODE<1, LINE.COUNT> :"*": ORDER.LINE.KEY[1,3]
+      LINE.QUANTITY<1, LINE.COUNT> = DM.ORD.QTY
+      LINE.UOM<1, LINE.COUNT> = OL.ORD.QTY.UOM
+
+      USE.QTY = DM.ORD.QTY
+      IF ORDER.TYPE = "B" THEN
+         USE.QTY = OL.ORD.QTY
+      END
+      IF OL.LINE.WEIGHT > 0 AND USE.QTY > 0 THEN
+         LINE.WEIGHT<1, LINE.COUNT> = OL.LINE.WEIGHT / USE.QTY / 1000
+      END ELSE
+         LINE.WEIGHT<1, LINE.COUNT> = 0
+      END
+
+      IF OL.ADJUSTED.QTYUNIT.VOLUME.IN.M3.X.10K NE "" AND DELIV.MAN.BRAND.SEND.VOLUME = @TRUE THEN
+         VOLUME.FOR.UOM.IN.LITRES.X.10K = OL.ADJUSTED.QTYUNIT.VOLUME.IN.M3.X.10K * 1000
+         UOM.FOR.LITRES.VALUE = OL.ORD.QTY.UOM
+         UOM.FOR.DIMENSIONS = OL.ORD.QTY.UOM
+         GOSUB POPULATE.DIMENSIONS
+      END
+
+      RETURN
+
+**************************************************************************
+CHECK.SCAN.COUNT:
+*****************
+
+      PRODUCT.CODE.COUNT = DCOUNT(PRODUCT.PROVENANCE.REC<3>, @VM)
+
+      FOR PRODUCT.COUNT = 1 TO PRODUCT.CODE.COUNT
+         IF LINE.PRODUCT.CODE<1, LINE.COUNT> = PRODUCT.PROVENANCE.REC<3,PRODUCT.COUNT> THEN
+            PALLET.QTY = PRODUCT.PROVENANCE.REC<4,PRODUCT.COUNT>
+            PALLET.UOM = PRODUCT.PROVENANCE.REC<5,PRODUCT.COUNT>
+            IF PALLET.UOM = LINE.UOM<1, LINE.COUNT> THEN
+               LINE.SCAN.COUNT = INT(LINE.QUANTITY<1, LINE.COUNT>/PALLET.QTY)
+            END ELSE
+               RESULT = 0
+               QTY = LINE.QUANTITY<1, LINE.COUNT>
+               QTY.UOM = LINE.UOM<1, LINE.COUNT>
+               CALL FACTOR.QTY(QTY,QTY.UOM,RESULT,PALLET.UOM,MAT PF.PRODUCT.MASTER.REC,ERROR,ERROR.MSG)
+               LINE.SCAN.COUNT<1, LINE.COUNT> = INT(RESULT/PALLET.QTY)
+            END
+         END
+      NEXT PRODUCT.COUNT
+
+      RETURN
+
+**************************************************************************
+GET.COFC.TYPE:
+**************
+
+      COFC.TYPE = ""
+      IF OL.COFC.THRESHOLD.TYPE # "" THEN
+         COFC.TYPE = FIELD(OL.COFC.THRESHOLD.TYPE, "*", 1)
+         IF COFC.TYPE = "NONE" THEN
+            COFC.TYPE = ""
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+SET.JOB.LINES.DATA:
+*******************
+
+      JOB.LINE.DISPLAY.NUMBER = LINE.DISPLAY.NUMBER
+      JOB.LINE.ORIGINATOR.KEY = LINE.ORIGINATOR.KEY
+      JOB.LINE.DELIVERY.OR.COLLECTION = LINE.DELIVERY.OR.COLLECTION
+      JOB.LINE.PRODUCT.CODE = LINE.PRODUCT.CODE
+      JOB.LINE.BARCODE = LINE.BARCODE
+      JOB.LINE.QUANTITY = LINE.QUANTITY
+      JOB.LINE.UOM = LINE.UOM
+      JOB.LINE.DESCRIPTION = LINE.DESCRIPTION
+      JOB.LINE.WEIGHT = LINE.WEIGHT
+      JOB.LINE.LENGTH = LINE.LENGTH
+      JOB.LINE.WIDTH = LINE.WIDTH
+      JOB.LINE.DEPTH = LINE.DEPTH
+      JOB.LINE.INDICATOR = LINE.INDICATOR
+      JOB.LINE.RESTRICTED = LINE.RESTRICTED
+      JOB.LINE.PRODUCT.SCAN.COUNT = LINE.SCAN.COUNT
+
+      RETURN
+
+**************************************************************************
+GET.SPLIT.DATA:
+***************
+
+      USE.SPLIT.DATA = @FALSE
+
+      IF ORDER.TYPE = "B" THEN
+         IF SPLIT.NUMBER = 0 THEN
+            DATA.DUE = ""
+         END ELSE
+            SPLIT.NUM.USE = SPLIT.NUMBER
+            NO.SP = DCOUNT(OH.PARTIAL.DATE, @VM) + 1
+            IF SPLIT.NUMBER >= NO.SP THEN
+               DATA.DUE = ""
+            END ELSE
+               DATA.DUE = RAISE(OH.DELIV.LOAD.TIMES.RESTRICTIONS<1, SPLIT.NUM.USE>)
+            END
+
+            TMP.VAR = DATA.DUE
+            TMP.VAR = CHANGE(TMP.VAR, @TM, "")
+            TMP.VAR = CHANGE(TMP.VAR, @SVM, "")
+            TMP.VAR = CHANGE(TMP.VAR, @VM, "")
+            TMP.VAR = CHANGE(TMP.VAR, @AM, "")
+            TMP.VAR = TRIM(TMP.VAR)
+
+            IF TMP.VAR # "" THEN USE.SPLIT.DATA = @TRUE
+         END
+      END ELSE
+         DATA.DUE = ""
+      END
+
+      IF USE.SPLIT.DATA THEN
+         MOBILE.PHONE = DATA.DUE<1,1,1>
+         MOBILE.NAME = DATA.DUE<1,1,2>
+         MOBILE.SMS = DATA.DUE<1,1,3>
+         MOBILE.PHONE2 = DATA.DUE<1,2,1>
+         MOBILE.NAME2 = DATA.DUE<1,2,2>
+         MOBILE.SMS2 = DATA.DUE<1,2,3>
+         EMAIL.ADDRESS = DATA.DUE<1,3>
+* collected or delivery (DELIVERY)
+         EPOD.EMAIL = RAISE(DATA.DUE<1,5>)
+         EPOD.PER.TKT.SIG = DATA.DUE<1,6>
+         DELIVERY.SLOT = DATA.DUE<1,7>
+         TIP.TIME = DATA.DUE<1,8>
+         HEALTH.SAFETY.INDS = RAISE(DATA.DUE<1,9>)
+         HEALTH.SAFETY.DETS = RAISE(DATA.DUE<1,10>)
+         NOT.BETWEEN.START = DATA.DUE<1,11,1>
+         NOT.BETWEEN.END = DATA.DUE<1,11,2>
+         NOT.BEFORE = DATA.DUE<1,12>
+         NOT.AFTER = DATA.DUE<1,13>
+         BAN.VEHICLE= DATA.DUE<1,14,1>
+         BAN.VEHICLE.MAX = DATA.DUE<1,14,2>
+         REQ.VEHICLE = DATA.DUE<1,15>
+         REQ.VEHICLE.REG = DATA.DUE<1,16>
+
+      END ELSE
+
+         MOBILE.PHONE = OH.CUST.MOBILE<1,1>
+         MOBILE.NAME = OH.CUST.MOBILE<1,2>
+         MOBILE.SMS = OH.CUST.MOBILE<1,3>
+         MOBILE.PHONE2 = OH.CUST.MOBILE.2<1,1>
+         MOBILE.NAME2 = OH.CUST.MOBILE.2<1,2>
+         MOBILE.SMS2 = OH.CUST.MOBILE.2<1,3>
+         EMAIL.ADDRESS = OH.EMAIL.NOTIFICATION
+* collected or delivery (DELIVERY)
+         EPOD.EMAIL = OH.EPOD.EMAIL.ADDRESS
+         EPOD.PER.TKT.SIG = OH.EPOD.PER.TKT.SIG
+         DELIVERY.SLOT = OH.DELIVERY.SLOT
+         TIP.TIME = OH.TIP.TIME
+         HEALTH.SAFETY.INDS = OH.HEALTH.SAFETY.INDS
+         HEALTH.SAFETY.DETS = OH.HEALTH.SAFETY.DETS
+         NOT.BETWEEN.START = OH.NOT.BETWEEN<1,1>
+         NOT.BETWEEN.END = OH.NOT.BETWEEN<1,2>
+         NOT.BEFORE = OH.NOT.BEFORE
+         NOT.AFTER = OH.NOT.AFTER
+         BAN.VEHICLE= OH.BAN.VEHICLE<1,1>
+         BAN.VEHICLE.MAX = OH.BAN.VEHICLE<1,2>
+         REQ.VEHICLE = OH.REQ.VEHICLE
+         REQ.VEHICLE.REG = OH.REQ.VEHICLE.REG
+      END
+
+      RETURN
+
+**************************************************************************
+CHECK.PILOT:
+************
+
+      INPUT.ARRAY = "PILOT CHECK"
+      INPUT.ARRAY<2> = TRM.BRN.CODE
+      OUTPUT.ARRAY = ""
+
+      CALL BS.CHECK.EXPLOSIVE.RESTRICTION.METHODS (INPUT.ARRAY, OUTPUT.ARRAY, S.ERR, SPARE2, SPARE)
+
+      DO.CHECK = OUTPUT.ARRAY<1>
+      ERR<-1> = S.ERR
+
+      RETURN
+
+**************************************************************************
+POPULATE.FIELDS.FROM.PROD.MASTER:
+*********************************
+
+      IF PF.MST.BAR.CDS<1,1> # "" THEN
+         LINE.BARCODE<1, LINE.COUNT> = PF.MST.BAR.CDS<1,1>
+      END
+
+      RESTRICTED.FLAG = @FALSE
+      IF OL.PROD.CODE THEN
+         PRODUCT.CODE = OL.PROD.CODE
+      END ELSE
+         PRODUCT.CODE = PF.MCP.PROD.CODES<1,COMPONENT.COUNT>
+      END
+
+      AGE.RES.REC = RAISE(AGE.RESTRICTED.ITEM.LIST.REC)
+      IF RESTRICTED.FLAG = @FALSE THEN
+         LOCATE PRODUCT.CODE IN AGE.RES.REC SETTING POS THEN
+            RESTRICTED.FLAG = @TRUE
+         END
+      END
+
+      BS.POISON.REC = RAISE(BS.POISON.PROD.LIST.REC)
+      IF RESTRICTED.FLAG = @FALSE THEN
+         LOCATE PRODUCT.CODE IN BS.POISON.REC SETTING POS THEN
+            RESTRICTED.FLAG = @TRUE
+         END
+      END
+
+      GOSUB CHECK.PILOT
+      IF DO.CHECK THEN
+         IF RESTRICTED.FLAG = @FALSE THEN
+            LOCATE PRODUCT.CODE IN EXPLOSIVE.PRODUCT.LIST.ONE SETTING POS THEN
+               RESTRICTED.FLAG = @TRUE
+            END
+         END
+
+         IF RESTRICTED.FLAG = @FALSE THEN
+            LOCATE PRODUCT.CODE IN EXPLOSIVE.PRODUCT.LIST.TWO SETTING POS THEN
+               RESTRICTED.FLAG = @TRUE
+            END
+         END
+      END
+
+     IF RESTRICTED.FLAG THEN
+      
+         LINE.DESCRIPTION<1, LINE.COUNT> = RESTRICTED:PF.MST.DESC
+         LINE.RESTRICTED<1, LINE.COUNT> = @TRUE
+      END ELSE
+         LINE.DESCRIPTION<1, LINE.COUNT> = PF.MST.DESC
+         LINE.RESTRICTED<1, LINE.COUNT> = @FALSE
+      END
+
+      IF PF.MST.DOP.REQUIRED = "Y" THEN
+         IF LINE.INDICATOR<1, LINE.COUNT> = "" THEN
+            LINE.INDICATOR<1, LINE.COUNT> = "CE"
+         END ELSE
+            LINE.INDICATOR<1, LINE.COUNT,-1> = "CE"
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+POPULATE.DIMENSIONS:
+********************
+
+      CALL DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM(VOLUME.FOR.UOM.IN.LITRES.X.10K,
+         UOM.FOR.LITRES.VALUE, UOM.FOR.DIMENSIONS, MAT PF.PRODUCT.MASTER.REC,
+         LENGTH.FOR.LINE, WIDTH.FOR.LINE, DEPTH.FOR.LINE)
+      LINE.LENGTH<1, LINE.COUNT> = LENGTH.FOR.LINE
+      LINE.WIDTH<1, LINE.COUNT> = WIDTH.FOR.LINE
+      LINE.DEPTH<1, LINE.COUNT> = DEPTH.FOR.LINE
+      RETURN
+
+**************************************************************************
+SET.BMX.ATTRIBUTES:
+*******************
+
+      IF BMX.ORDER THEN
+         JOB.TYPE.REF = "BMXJOB"
+         JOB.VEHICLE.TYPE = BMX.REQ.VEHICLE.TYPE
+         IF SPECIAL.CONDITIONS THEN
+            JOB.SERVICE.LEVEL = BMX.PREM.SERVICE.LEVEL
+         END ELSE
+            JOB.SERVICE.LEVEL = BMX.STD.SERVICE.LEVEL
+         END
+      END ELSE
+         JOB.TYPE.REF = "STDJOB"
+         JOB.VEHICLE.TYPE = ""
+         IF SPECIAL.CONDITIONS THEN
+            JOB.SERVICE.LEVEL = NON.BMX.PREM.SERVICE.LEVEL
+         END ELSE
+            JOB.SERVICE.LEVEL = NON.BMX.STD.SERVICE.LEVEL
+         END
+      END
+
+      RETURN
+
+**************************************************************************
+   END

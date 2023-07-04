@@ -1,0 +1,4167 @@
+      SUBROUTINE UNT.DELIV.MAN.BUILD.ORDER.JOB.DATA(RESULTS)
+      PROGRAM.NAME = "UNT.DELIV.MAN.BUILD.ORDER.JOB.DATA"
+
+**************************************************************************
+* Description
+* ~~~~~~~~~~~
+* Unit test program for Delivery Management build Job Data for Sales Order
+* program DELIV.MAN.BUILD.ORDER.JOB.DATA
+**************************************************************************
+* Author       : Mark Gamble
+* Date Written : 15/01/20
+*
+* Job #    Date     Inits       Comments
+* ======== ======== =========== ==========================================
+* 15624r01 15/01/20 mgamb       Original Version
+* 15624r01 07/02/20 lneal       Amend vehicle restrictions field
+* 15624r01 13/02/20 pfala       Add parameters for Initial Load
+* 15624r01 02/03/20 mgamb       Add delivery address hashing - call
+*                               DELIV.MAN.GENERATE.ADDRESS.HASH
+* 15624r01 03/03/20 mgamb       Add split ticket amounts to follow - call
+*                               DELIV.MAN.GET.BALANCE.TO.FOLLOW
+* 15624r01 30/03/20 mgamb       scp-1419 versioning/restructure id
+* 15624r01 14/04/20 pfala       Split Tickets
+* 15624r01 16/04/20 mgamb       Change default values from "" to "0"
+* 15624r01 17/04/20 mgamb       scp-1419 versioning/restructure id
+* 15624r14 28/04/20 sdobb       Do not send delivery charge or sundry
+*                               lines
+* 15624r14 18/05/20 pfala       SCP-1458 Job Data Fixes
+* 15624r14 12/05/20 sdobb       Change BEFORE.NINE to SPECIAL.CONDITIONS
+*                               Call DELIV.MAN.GET.INSTRUCTIONS to
+*                               populate INSTRUCTIONS and SPECIAL CONDITIONS
+* 15624r14 08/06/20 pfala       SCP-1383 Map Old Contacts To New
+* 15624r14 10/06/20 mgamb       SCP-1508 Change JOB.LINE.ORIGINATOR.KEY format
+* 15624r14 12/06/20 pfala       SCP-1498 Balance To Follow  - Add passed file varibles
+* 15624r14 19/06/20 pfala       SCP-1497 Dont Send Split Zero Qtys
+* 15624r14 16/07/20 pfala       SCP-1558 Update JOB.SALES.COST.CENTRE if not remote ticket
+* 15624r14 20/07/20 pfala       SCP-1557 Health And Safety Questions
+* 15624rxx 16/09/20 jpyc        SCP-1653 Cash split weight
+* 15655    11/01/21 jpyc        SCP-1707 Make split B tickets work
+* 15655rnn 15/01/21 ams         SCP-1774 Cash split restrictions
+* 15655r11 28/01/21 sdobb       SCP-1794 Add product dimensions
+* 15655r11 11/02/21 sdobb       SCP-1795 Populate with amended dimensions
+* 15655rnn 24/02/21 lneal       SCP-1755 earliest/latest time validation
+* 15655rnn 08/03/21 ams         SCP-1844 Sort out wrong name for brn-detail
+*                               and added sy.params param
+* 15655r35 13/05/21 mgamb       SCP-1797 Identify BMX jobs
+* 15655r35 06/08/21 lneal       SCP-1982 Add additional BMX attributes
+* 15672r22 10/11/21 vissi       SCP-2120 Don't send CE and Chain of Custody to Openfleet
+* 15672r34 15/03/22 umaan       SCP-2284 Made sure JOB.CUST.EPOD.EMAIL is polpulated with receiving
+*                                branch email address instead of fulfilling branch email address
+* 15672r36 24/03/22 umaan       SCP-2299 Madesure that service level set correctly for TP jobs
+* 15672r94 22/08/22 umaan       SCP-2437 Additional variables added to
+*                               ERROR.MESSAGE
+* 15714r74 09/03/23 dimdi       SCP-2544 Added JOB.LINE.RESTRICTED attribute
+* 15714r88 26/04/23 dimdi       SCP-2585 Added JOB.LINE.PRODUCT.SCAN.COUNT attribute
+**************************************************************************
+
+************
+* INCLUDES *
+************
+
+      INCLUDE INCLUDES UTF.MOCK.CONST
+      INCLUDE INCLUDES EQU.DELIV.MAN.JOB.DATA
+      INCLUDE INCLUDES EQU.ORDER.HEADER.REC
+      INCLUDE INCLUDES EQU.ORDER.LINE.DIM
+      INCLUDE INCLUDES EQU.PF.PRODUCT.MASTER.DIM
+      INCLUDE INCLUDES EQU.BRN.DETAIL.DIM
+      INCLUDE INCLUDES EQU.PF.MCP.PRODUCTS.DIM
+      INCLUDE INCLUDES EQU.PO.HEADER.DIM
+      INCLUDE INCLUDES EQU.PO.LINE.DIM
+      INCLUDE INCLUDES BS.OE.TICKET.COMMON
+
+**************
+* FILE OPENS *
+**************
+
+      ACCOUNT.NAME = OCONV(@WHO, "MCU")
+      ERR = ""
+
+      INCLUDE INCLUDES OPEN.FILE.ORDER.HEADER
+      INCLUDE INCLUDES OPEN.FILE.BRN.DETAIL
+      INCLUDE INCLUDES OPEN.FILE.HO.CUSTOMER
+      INCLUDE INCLUDES OPEN.FILE.BS.DELIVERY.SLOTS
+      INCLUDE INCLUDES OPEN.FILE.PF.PRODUCT.MASTER
+      INCLUDE INCLUDES OPEN.FILE.PF.MCP.PRODUCTS
+      INCLUDE INCLUDES OPEN.FILE.VOC
+      INCLUDE INCLUDES OPEN.FILE.SY.PARAMS
+      INCLUDE INCLUDES OPEN.FILE.PO.HEADER
+      INCLUDE INCLUDES OPEN.FILE.PO.LINE
+
+      IF ERR = "" THEN
+         GOSUB MAIN.PROG
+      END ELSE
+         ERR = CHANGE(TRIM(ERR), @AM, " ")
+         TEST.ERROR.MESSAGE = PROGRAM.NAME : " CANNOT OPEN FILES " : ERR
+         CALL ASSERT.FAIL(TEST.ERROR.MESSAGE, RESULTS)
+      END
+
+      RETURN
+
+**************************************************************************
+MAIN.PROG:
+**********
+
+      GOSUB CREATE.MOCKS
+      GOSUB INITIALISATION
+      GOSUB RUN.TESTS
+      GOSUB RUN.SPLIT.TESTS
+      GOSUB DELETE.MOCKS
+
+      RETURN
+
+**************************************************************************
+INITIALISATION:
+***************
+
+      PARTIAL.DATE = ""
+      OPEN "DOCUMENT-HISTORY-2101" TO DOC.HIST.FV ELSE
+         CALL ASSERT.FAIL("Cannot open DOCUMENT-HISTORY-2101", "")
+      END
+
+      RETURN
+
+**************************************************************************
+RUN.TESTS:
+**********
+
+      GOSUB ShouldErrorIfModeIncorrect
+      GOSUB ShouldErrorIfOrderNotFound
+      GOSUB ShouldErrorIfOpenFileFails
+      GOSUB ShouldErrorIfGenerateAddressHashFails
+      GOSUB ShouldReturnErrorIfGetBalanceToFollowFails
+      GOSUB ShouldReturnErrorIfOrdHdrFvBlank
+      GOSUB ShouldReturnValidOneLineJobData
+      GOSUB ShouldReturnValidTwoLineJobData
+      GOSUB ShouldReturnValidThreeLineJobData
+      GOSUB ShouldReturnValidJobDataThreeLineSecondDeleted
+      GOSUB ShouldReturnValidJobDeletedLine
+      GOSUB ShouldReturnValidJobCashTicket
+      GOSUB ShouldReturnValidJobIbt
+      GOSUB ShouldReturnValidJobTwoLineIbt
+      GOSUB ShouldReturnValidJobIbtMcp
+      GOSUB ShouldReturnValidJobCashTicketMcp
+      GOSUB ShouldReturnValidVehicleRestrictions
+      GOSUB ShouldReturnValidJobDataOutstandingItem
+      GOSUB ShouldNotReturnInvalidLineInJobData
+      GOSUB ShouldUpdateCOSTCENTREWithBranchIfNotRemote
+      GOSUB ShouldUpdateHSQuestionsOldWay
+      GOSUB ShouldSetHSHazardsToFalse
+      GOSUB ShouldUpdatePodSignature
+      GOSUB ShouldReturnValidLatestTime
+      GOSUB ShouldUseVolumeOnLineToCalcDimsIfPresent
+      GOSUB ShouldConvertDimsToStockUomForMCP
+      GOSUB ShouldReturnWithBMXAttributesForTicket
+      GOSUB ShouldNotReturnWithBMXDetailsForShroomFlgSetTicket
+      GOSUB ShouldNotReturnWithBMXDetailsShroomFlgNotSetTicket
+      GOSUB ShouldReturnWithBMXDetailsForIBTFromTicket
+      GOSUB ShouldNotReturnWithBMXDetailsIBTFromTicketShroomFlgSet
+      GOSUB ShouldReturnWithBMXDetailsForIBTFromTicketDiffBranch
+      GOSUB ShouldNotReturnWithBMXDetailsIBTFromTicketDiffBranchErr
+      GOSUB ShouldNotReturnWithBMXInstructionsIBTFromPoNoOrder
+      GOSUB ShouldReturnWithBMXDetailsForIBTFromPoLinkedOrderSameBranch
+      GOSUB ShouldReturnWithBMXDetailsForIBTFromPoLinkedOrderDiffMachine
+      GOSUB ShouldReturnWithBMXDetailsForIBTFromPoLinkedDocHistDiffMachine
+      GOSUB ShouldReturnWithBMXDetailsForIBTFromPoLinkedDocHistSameMachine
+      GOSUB ShouldReturnValidJobDataForTPJob
+      GOSUB ShouldReturnValidScanCountIfAllWithinPOCCriteria
+      GOSUB ShouldReturnZeroScanCountIfCustomerNotinPOCCriteria
+      GOSUB ShouldReturnZeroScanCountIfPostCodeNotinPOCCriteria
+      GOSUB ShouldReturnZeroScanCountIfProductOutsidePOC
+      GOSUB ShouldReturnValidJobDataForTPJobWhenUOMsDifferent
+      GOSUB ShouldReturnZeroScanCountIfBranchBrandNotinPOCCriteria
+
+      RETURN
+
+**************************************************************************
+RUN.SPLIT.TESTS:
+****************
+
+      GOSUB ShouldReturnValidJobDataCashNoSplit
+
+      GOSUB ShouldReturnValidJobDataCashFirstSplitOrig
+      GOSUB ShouldReturnValidJobDataCashFirstSplitLatest
+
+      GOSUB ShouldReturnValidJobDataCashSecondSplitOrig
+      GOSUB ShouldReturnValidJobDataCashSecondSplitPrior
+      GOSUB ShouldReturnValidJobDataCashSecondSplitLatest
+
+      GOSUB ShouldReturnValidJobDataCashThirdSplitOrig
+      GOSUB ShouldReturnValidJobDataCashThirdSplitPrior2
+      GOSUB ShouldReturnValidJobDataCashThirdSplitPrior
+      GOSUB ShouldReturnValidJobDataCashThirdSplitLatest
+
+      GOSUB ShouldReturnValidJobDataCashThirdSplitLatestZeroBalance
+
+      RETURN
+
+**************************************************************************
+ShouldConvertDimsToStockUomForMCP:
+**********************************
+
+      TEST.PRINT = "Should call litres to dims subroutine with Stock Uom for MCP"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+      DELIVERY.ID = "19091*B12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB ADD.MCP.LINE
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 2
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.STOCK.UOM = "EA"
+      PF.MST.SINGLE.UOM = "BG"
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, 381500
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM called with litres uom from Litres Uom"
+      EXPECTED.RESULT = "BG"
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "IN.UOM.FOR.LITRES.VALUE", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM called with dimensions uom from Stock Uom"
+      EXPECTED.RESULT = "EA"
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "IN.UOM.FOR.DIMENSIONS", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldUseVolumeOnLineToCalcDimsIfPresent:
+*****************************************
+
+      TEST.PRINT = "Should call litres to dims subroutine with value in litres calculated from volume for 1 of qty uom"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @TRUE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      OL.ADJUSTED.QTYUNIT.VOLUME.IN.M3.X.10K = 190.8
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY = ""
+      OETC.LINE.ARRAY<1> = LOWER(ORDER.LINE.DREC)
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM called with volume calculated from line"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "IN.LITRES.VALUE.X.10K", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM called with litres uom from line"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "IN.UOM.FOR.LITRES.VALUE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM called with dimensions uom from line"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "IN.UOM.FOR.DIMENSIONS", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldNotReturnInvalidLineInJobData:
+***********************************
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for order with Sundry Line"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB ADD.SUNDRY.LINE
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+      RETURN
+
+**************************************************************************
+ShouldErrorIfModeIncorrect:
+***************************
+
+      TEST.PRINT = "Should return error if MODE is incorrect"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      MODE = "ABC"
+      DELIV.MAN.BRANCH = @FALSE
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "Error message returned when MODE is incorrect"
+      EXPECTED.RESULT = "Program: DELIV.MAN.BUILD.ORDER.JOB.DATA Invalid Mode: ABC"
+      ACTUAL.RESULT = ERROR.MESSAGE
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldErrorIfOrderNotFound:
+***************************
+
+      TEST.PRINT = "Should return error if Order Number not found"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      DELETE ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      STACK.TRACE = 1 :@VM: "Path of 1st program" :@VM: "Final value no. 1"
+      CALL MOCK.WANT(MOCK.UTL.SYSTEM, "RESPONSE", STACK.TRACE, ERR.TEXT)
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "Error message returned when Order Number not known"
+      EXPECTED.RESULT = "Program: DELIV.MAN.BUILD.ORDER.JOB.DATA Order Number not found " : ORDER.HEADER.KEY
+      EXPECTED.RESULT := " Account Name: " : ACCOUNT.NAME : " " : LOWER(STACK.TRACE)
+      ACTUAL.RESULT = ERROR.MESSAGE
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldErrorIfOpenFileFails:
+***************************
+
+      TEST.PRINT = "Should return error when failed to Open BRN-DETAIL file"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+      MODE = "LIVE"
+
+      READ ORIG.BRN.DETAIL.VOC FROM VOC.FV, "BRN-DETAIL" ELSE
+         ORIG.BRN.DETAIL.VOC = ""
+      END
+      DELETE VOC.FV, "BRN-DETAIL"
+      BRN.DETAIL.OPENED = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "Error message returned when cannot open BRN-DETAIL file"
+      EXPECTED.RESULT = "Program: DELIV.MAN.BUILD.ORDER.JOB.DATA CANNOT OPEN FILES  BRN-DETAIL "
+      ACTUAL.RESULT = ERROR.MESSAGE
+      GOSUB CALL.ASSERT.EQUALS
+
+      WRITE ORIG.BRN.DETAIL.VOC TO VOC.FV, "BRN-DETAIL"
+      OPEN "BRN-DETAIL" TO BRN.DETAIL.FV THEN
+         BRN.DETAIL.OPENED = ACCOUNT.NAME
+      END ELSE
+         CALL ASSERT.FAIL("CANNOT RE-OPEN BRN-DETAIL", "")
+      END
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldErrorIfGenerateAddressHashFails:
+**************************************
+
+      TEST.PRINT = "Should return empty JOB.DATA array and relevant error message if Address Hashing fails"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      EXPECTED.JOB.DATA = ""
+      CALL MOCK.SET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "ERROR.MESSAGE", 1, 1, "Address Hashing failed", "", "")
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array is empty"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called with correct ADDRESS.LINE.1"
+      EXPECTED.RESULT = OH.DELIV.ALT.ADDRESS<1,1>
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "ADDRESS.LINE.1", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called with correct ADDRESS.LINE.2"
+      EXPECTED.RESULT = OH.DELIV.ALT.ADDRESS<1,2>
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "ADDRESS.LINE.2", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called with correct ADDRESS.LINE.3"
+      EXPECTED.RESULT = OH.DELIV.ALT.ADDRESS<1,3>
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "ADDRESS.LINE.3", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called with correct ADDRESS.LINE.4"
+      EXPECTED.RESULT = OH.DELIV.ALT.ADDRESS<1,4>
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "ADDRESS.LINE.4", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called with correct POSTCODE"
+      EXPECTED.RESULT = "SW1A 1AA"
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "POSTCODE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GENERATE.ADDRESS.HASH called with correct COUNTRY"
+      EXPECTED.RESULT = "GB"
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "COUNTRY", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Error message returned when call to DELIV.MAN.ADDRESS.HASH failed"
+      EXPECTED.RESULT = "Address Hashing failed"
+      ACTUAL.RESULT = ERROR.MESSAGE
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnErrorIfGetBalanceToFollowFails:
+*******************************************
+
+      TEST.PRINT = "Should return empty JOB.DATA array and relevant error message if Balance To Follow fails"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      EXPECTED.JOB.DATA = ""
+      CALL MOCK.SET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "ERROR.MESSAGE", 1, 1, "Balance To Follow failed", "", "")
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array is empty"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called with correct DELIVERY.ID"
+      EXPECTED.RESULT = DELIVERY.ID
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "DELIVERY.ID", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called with correct ARRAY.OF.VALID.LINE.NBRS"
+      EXPECTED.RESULT = "1"
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "ARRAY.OF.VALID.LINE.NBRS", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Error message returned when call to DELIV.MAN.GET.BALANCE.TO.FOLLOW failed"
+      EXPECTED.RESULT = "Balance To Follow failed"
+      ACTUAL.RESULT = ERROR.MESSAGE
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnErrorIfOrdHdrFvBlank:
+*********************************
+
+      TEST.PRINT = "Should return error when PASSED.ORDER.HEADER.FV is blank"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      MODE = "TEST"
+      PASSED.ORDER.HEADER.FV = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "Error message returned when cannot open ORDER-HEADER file"
+      EXPECTED.RESULT = "Program: DELIV.MAN.BUILD.ORDER.JOB.DATA CANNOT OPEN FILES  ORDER-HEADER "
+      ACTUAL.RESULT = ERROR.MESSAGE
+      GOSUB CALL.ASSERT.EQUALS
+
+      OPEN "ORDER-HEADER" TO ORDER.HEADER.FV THEN
+         ORDER.HEADER.OPENED = ACCOUNT.NAME
+      END ELSE
+         CALL ASSERT.FAIL("CANNOT RE-OPEN ORDER-HEADER", "")
+      END
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidOneLineJobData:
+********************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for order with only one line"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @TRUE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with line 1"
+      EXPECTED.RESULT = "TURN LEFT"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.INSTRUCTION.LINE.1", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with line 2"
+      EXPECTED.RESULT = "TURN RIGHT"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.INSTRUCTION.LINE.2", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with delivery slot of 001"
+      EXPECTED.RESULT = "001"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.DELIVERY.SLOT", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidTwoLineJobData:
+********************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for order with two lines"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB ADD.SECOND.LINE
+      JOB.LINE.RESTRICTED := @FALSE :@VM: @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT := 0 :@VM: 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 2
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidThreeLineJobData:
+**********************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for order with three lines"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB ADD.SECOND.LINE
+      GOSUB ADD.THIRD.LINE
+      GOSUB SAVE.RESTRICTIONS
+      JOB.LINE.RESTRICTED := @FALSE :@VM: @FALSE :@VM: @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT := 0 :@VM: 0 :@VM: 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 2 : @VM : 3
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataThreeLineSecondDeleted:
+***********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA with correct info, order with three lines second line deleted"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB ADD.DELETED.LINE
+      GOSUB ADD.THIRD.LINE
+
+      OH.EPOD.EMAIL.ADDRESS= "JOHN.SMITH2@MAIL.COM"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+      GOSUB SAVE.RESTRICTIONS
+
+      JOB.CUST.EPOD.EMAIL = "JOHN.SMITH2@MAIL.COM" :@VM: "JEFF.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED := @FALSE :@VM: @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT := 0 :@VM: 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 3
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDeletedLine:
+********************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for order with two lines but one deleted"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB ADD.DELETED.LINE
+
+      OH.EPOD.EMAIL.ADDRESS = ""
+      OH.EMAIL.NOTIFICATION = ""
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+      GOSUB SAVE.RESTRICTIONS
+
+      JOB.CUST.EPOD.EMAIL = "JEFF.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobCashTicket:
+*******************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for cash order"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobIbt:
+************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for IBT"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCT.AND.DIM.WANTS.FOR.IBT
+      GOSUB SAVE.RESTRICTIONS
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      JOB.CUST.EPOD.EMAIL = "JOHN.SMITH@MAIL.COM"
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobTwoLineIbt:
+*******************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for two line IBT"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCT.AND.DIM.WANTS.FOR.IBT
+      GOSUB ADD.SECOND.LINE
+      GOSUB SAVE.RESTRICTIONS
+      JOB.LINE.RESTRICTED := @FALSE :@VM: @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT := 0 :@VM: "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 2
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobIbtMcp:
+***************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for IBT with MCP product"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCT.AND.DIM.WANTS.FOR.IBT
+      GOSUB ADD.MCP.LINE
+      GOSUB SAVE.RESTRICTIONS
+      JOB.CUST.EPOD.EMAIL = "JOHN.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED := @FALSE :@VM: @FALSE :@VM: @FALSE :@VM: @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT := 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 2
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM called three times"
+      EXPECTED.RESULT = 3
+      ACTUAL.RESULT = MOCK.CALLED(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobCashTicketMcp:
+**********************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for Cash Ticket with MCP product"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+      GOSUB ADD.MCP.LINE
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED := @FALSE :@VM: @FALSE :@VM: @FALSE :@VM: @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT := "0"
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = 1 : @VM : 2
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidVehicleRestrictions:
+*************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct information for Cash Ticket with instructions populate"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+      GOSUB ADD.ALL.VEHICLE.RESTRICTIONS
+      GOSUB SAVE.RESTRICTIONS
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with line 1"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.INSTRUCTION.LINE.1", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with line 2"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.INSTRUCTION.LINE.2", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with banned vehicle type"
+      EXPECTED.RESULT = "A"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.BANNED.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with max vehicle type"
+      EXPECTED.RESULT = "B"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.MAX.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with rqd vehicle type"
+      EXPECTED.RESULT = "C"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with rqd vehicle reg"
+      EXPECTED.RESULT = "ABC123"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.REG", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataOutstandingItem:
+****************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with correct outstanding items when order is split"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      JOB.ITEMS.OUTSTANDING.CODE = "123456"
+      JOB.ITEMS.OUTSTANDING.DESCRIPTION = "BALLPENE HAMMER (SMALL)"
+      JOB.ITEMS.OUTSTANDING.QUANTITY = 1
+      JOB.ITEMS.OUTSTANDING.UOM = "EA"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+      TO.FOLLOW = ""
+      TO.FOLLOW<1,1> = "123456"
+      TO.FOLLOW<2,1> = "BALLPENE HAMMER (SMALL)"
+      TO.FOLLOW<3,1> = "1"
+      TO.FOLLOW<4,1> = "EA"
+      CALL MOCK.SET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "TO.FOLLOW.LIST", 1, 1, TO.FOLLOW, "", "")
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called with correct DELIVERY.ID"
+      EXPECTED.RESULT = DELIVERY.ID
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "DELIVERY.ID", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called with correct PASSED.ORDER.HEADER.FV"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "PASSED.ORDER.HEADER.FV", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called with correct PASSED.ORDER.LINE.FV"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "PASSED.ORDER.LINE.FV", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.BALANCE.TO.FOLLOW called with correct MODE"
+      EXPECTED.RESULT = "LIVE"
+      ACTUAL.RESULT = MOCK.GET(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "MODE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashNoSplit:
+************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Cash order not split"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75140*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      JOB.LINE.QUANTITY = "3"
+      JOB.LINE.WEIGHT = "0"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashFirstSplitOrig:
+*******************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Original Cash order split once"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75140-1*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      PARTIAL.DATE = "12345"
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+      EXP.OH.CUST.MOBILE = "07742111111" :@VM:@VM: "Y"
+      EXP.OH.CUST.MOBILE.2 = "07742222222" :@VM:@VM: "Y"
+      EXP.OH.ALERT.EMAIL.ADDRESS = "ALERT EMAIL1"
+      EXP.OH.COLLECTED = "COLL1"
+      EXP.OH.EPOD.EMAIL.ADDRESS = "EPOD EMAIL1"
+      EXP.OH.EPOD.PER.TKT.SIG = "Y"
+      EXP.OH.DELIVERY.SLOT = "001"
+      EXP.OH.TIP.TIME = "600"
+      EXP.OH.HEALTH.SAFETY.INDS = "HANDS INDS1" :@SVM: "HANDS INDS1 PART2" :@VM: "HANDS INDS1 PART3" :@SVM: "HANDS INDS1 PART4"
+      EXP.OH.HEALTH.SAFETY.DETS = "HANDS DETS1" :@SVM: "HANDS DETS1 PART2" :@VM: "HANDS DETS1 PART3" :@SVM: "HANDS DETS1 PART4"
+      EXP.OH.NOT.BETWEEN = "10:00" :@VM: "12:00"
+      EXP.OH.NOT.BEFORE = "08:00"
+      EXP.OH.NOT.AFTER = "16:00"
+      EXP.OH.BAN.VEHICLE = "BAN VEHICLE 1"
+      EXP.OH.REQ.VEHICLE = "REQ VEHICLE 1"
+      EXP.OH.REQ.VEHICLE.REG = "REQ VEHICLE REG 1"
+
+      EXP.OH.CUST.MOBILE :=@AM: "07742333333" :@VM:@VM: "Y"
+      EXP.OH.CUST.MOBILE.2 :=@AM: "07742444444" :@VM:@VM: "Y"
+      EXP.OH.ALERT.EMAIL.ADDRESS :=@AM: "ALERT EMAIL2"
+      EXP.OH.COLLECTED :=@AM: "COLL2"
+      EXP.OH.EPOD.EMAIL.ADDRESS :=@AM: "EPOD EMAIL2"
+      EXP.OH.EPOD.PER.TKT.SIG :=@AM: "N"
+      EXP.OH.DELIVERY.SLOT :=@AM: "002"
+      EXP.OH.TIP.TIME :=@AM: "1200"
+      EXP.OH.HEALTH.SAFETY.INDS :=@AM: "HANDS INDS2" :@SVM: "HANDS INDS2 PART2" :@VM: "HANDS INDS2 PART 3" :@SVM: "HANDS INDS2 PART4"
+      EXP.OH.HEALTH.SAFETY.DETS :=@AM: "HANDS DETS2" :@SVM: "HANDS DETS2 PART2" :@VM: "HANDS DETS2 PART 3" :@SVM: "HANDS DETS2 PART4"
+      EXP.OH.NOT.BETWEEN :=@AM: "11:00" :@VM: "11:30"
+      EXP.OH.NOT.BEFORE :=@AM: "09:00"
+      EXP.OH.NOT.AFTER :=@AM: "15:00"
+      EXP.OH.BAN.VEHICLE :=@AM: "BAN VEHICLE 2"
+      EXP.OH.REQ.VEHICLE :=@AM: "REQ VEHICLE 2"
+      EXP.OH.REQ.VEHICLE.REG :=@AM: "REQ VEHICLE REG 2"
+
+      OH.CUST.MOBILE = EXP.OH.CUST.MOBILE<2>
+      OH.CUST.MOBILE.2 = EXP.OH.CUST.MOBILE.2<2>
+      OH.ALERT.EMAIL.ADDRESS = EXP.OH.ALERT.EMAIL.ADDRESS<2>
+      OH.COLLECTED = EXP.OH.COLLECTED<2>
+      OH.EPOD.EMAIL.ADDRESS = EXP.OH.EPOD.EMAIL.ADDRESS<2>
+      OH.EPOD.PER.TKT.SIG = EXP.OH.EPOD.PER.TKT.SIG<2>
+      OH.DELIVERY.SLOT = EXP.OH.DELIVERY.SLOT<2>
+      OH.TIP.TIME = EXP.OH.TIP.TIME<2> * 60
+      OH.HEALTH.SAFETY.INDS = EXP.OH.HEALTH.SAFETY.INDS<2>
+      OH.HEALTH.SAFETY.DETS = EXP.OH.HEALTH.SAFETY.DETS<2>
+      OH.NOT.BETWEEN = EXP.OH.NOT.BETWEEN<2>
+      OH.NOT.BEFORE = EXP.OH.NOT.BEFORE<2>
+      OH.NOT.AFTER = EXP.OH.NOT.AFTER<2>
+      OH.BAN.VEHICLE = EXP.OH.BAN.VEHICLE<2>
+      OH.REQ.VEHICLE = EXP.OH.REQ.VEHICLE<2>
+      OH.REQ.VEHICLE.REG = EXP.OH.REQ.VEHICLE.REG<2>
+
+      OH.DELIV.LOAD.TIMES.RESTRICTIONS = ""
+      BITS.WORK = EXP.OH.CUST.MOBILE<1> :@AM: EXP.OH.CUST.MOBILE.2<1>
+      BITS.WORK := @AM: EXP.OH.ALERT.EMAIL.ADDRESS<1> :@AM: EXP.OH.COLLECTED<1>
+      BITS.WORK := @AM: EXP.OH.EPOD.EMAIL.ADDRESS<1> :@AM: EXP.OH.EPOD.PER.TKT.SIG<1>
+      BITS.WORK := @AM: EXP.OH.DELIVERY.SLOT<1> :@AM: (EXP.OH.TIP.TIME<1> * 60) :@AM: EXP.OH.HEALTH.SAFETY.INDS<1>
+      BITS.WORK := @AM: EXP.OH.HEALTH.SAFETY.DETS<1> :@AM: EXP.OH.NOT.BETWEEN<1>
+      BITS.WORK := @AM: EXP.OH.NOT.BEFORE<1> :@AM: EXP.OH.NOT.AFTER<1>
+      BITS.WORK := @AM: EXP.OH.BAN.VEHICLE<1> :@AM: EXP.OH.REQ.VEHICLE<1>
+      BITS.WORK := @AM: EXP.OH.REQ.VEHICLE.REG<1>
+      BITS.WORK = LOWER(BITS.WORK)
+      BITS.WORK = LOWER(BITS.WORK)
+      OH.DELIV.LOAD.TIMES.RESTRICTIONS<1> = BITS.WORK
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      JOB.LINE.QUANTITY = "2"
+      JOB.LINE.WEIGHT = "0"
+      JOB.CUST.MOBILE.PHONE = EXP.OH.CUST.MOBILE<1,1>
+      JOB.CUST.WORK.PHONE = EXP.OH.CUST.MOBILE.2<1,1>
+      JOB.CUST.EPOD.EMAIL = EXP.OH.EPOD.EMAIL.ADDRESS<1>
+      JOB.NOTES = CHANGE(EXP.OH.HEALTH.SAFETY.DETS<1>, @SVM, " ")
+
+      JOB.WINDOW.EARLIEST.DATE = "20200407"
+      JOB.WINDOW.EARLIEST.TIME = EXP.OH.NOT.BEFORE<1>[1,2]:EXP.OH.NOT.BEFORE<1>[4,2]
+      JOB.WINDOW.LATEST.DATE = "20200407"
+      JOB.WINDOW.LATEST.TIME = EXP.OH.NOT.AFTER<1>[1,2]:EXP.OH.NOT.AFTER<1>[4,2]
+      JOB.WINDOW.EXCLUSION.START.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.START.TIME = EXP.OH.NOT.BETWEEN<1,1>[1,2]:EXP.OH.NOT.BETWEEN<1,1>[4,2]
+      JOB.WINDOW.EXCLUSION.END.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.END.TIME = EXP.OH.NOT.BETWEEN<1,2>[1,2]:EXP.OH.NOT.BETWEEN<1,2>[4,2]
+      JOB.MINUTES.ALLOWED.FOR.DELIVERY = EXP.OH.TIP.TIME<1>
+      JOB.EPOD.PER.TKT.SIG = @TRUE
+      JOB.INSTRUCTIONS = "Required vehicle registration on this site is " : EXP.OH.REQ.VEHICLE.REG<1>
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @TRUE
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, WANT.ERROR)
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", JOB.INDICATORS.SPECIAL.CONDITIONS, WANT.ERROR)
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashFirstSplitLatest:
+*********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Latest Cash order split once"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75140-2*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      PARTIAL.DATE = "12345"
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "8"
+      JOB.LINE.WEIGHT = "0"
+      ARRAY.OF.VALID.LINE.NBRS = "" :@AM: "1"
+
+      EXP.OH.CUST.MOBILE = "07742111111" :@VM:@VM: "Y"
+      EXP.OH.CUST.MOBILE.2 = "07742222222" :@VM:@VM: "Y"
+      EXP.OH.ALERT.EMAIL.ADDRESS = "ALERT EMAIL1"
+      EXP.OH.COLLECTED = "COLL1"
+      EXP.OH.EPOD.EMAIL.ADDRESS = "EPOD EMAIL1"
+      EXP.OH.EMAIL.NOTIFICATION = "EMAIL1"
+      EXP.OH.EPOD.PER.TKT.SIG = "Y"
+      EXP.OH.DELIVERY.SLOT = "001"
+      EXP.OH.TIP.TIME = "600"
+      EXP.OH.HEALTH.SAFETY.INDS = "HANDS INDS1" :@SVM: "HANDS INDS1 PART2" :@VM: "HANDS INDS1 PART3" :@SVM: "HANDS INDS1 PART4"
+      EXP.OH.HEALTH.SAFETY.DETS = "HANDS DETS1" :@SVM: "HANDS DETS1 PART2" :@VM: "HANDS DETS1 PART3" :@SVM: "HANDS DETS1 PART4"
+      EXP.OH.NOT.BETWEEN = "10:00" :@VM: "12:00"
+      EXP.OH.NOT.BEFORE = "08:00"
+      EXP.OH.NOT.AFTER = "16:00"
+      EXP.OH.BAN.VEHICLE = "BAN VEHICLE 1"
+      EXP.OH.REQ.VEHICLE = "REQ VEHICLE 1"
+      EXP.OH.REQ.VEHICLE.REG = "REQ VEHICLE REG 1"
+
+      EXP.OH.CUST.MOBILE :=@AM: "07742333333" :@VM:@VM: "Y"
+      EXP.OH.CUST.MOBILE.2 :=@AM: "07742444444" :@VM:@VM: "Y"
+      EXP.OH.ALERT.EMAIL.ADDRESS :=@AM: "ALERT EMAIL2"
+      EXP.OH.COLLECTED :=@AM: "COLL2"
+      EXP.OH.EPOD.EMAIL.ADDRESS :=@AM: ""
+      EXP.OH.EMAIL.NOTIFICATION :=@AM: "EMAIL2"
+      EXP.OH.EPOD.PER.TKT.SIG :=@AM: "N"
+      EXP.OH.DELIVERY.SLOT :=@AM: "002"
+      EXP.OH.TIP.TIME :=@AM: "1200"
+      EXP.OH.HEALTH.SAFETY.INDS :=@AM: "HANDS INDS2" :@SVM: "HANDS INDS2 PART2" :@VM: "HANDS INDS2 PART 3" :@SVM: "HANDS INDS2 PART4"
+      EXP.OH.HEALTH.SAFETY.DETS :=@AM: "HANDS DETS2" :@SVM: "HANDS DETS2 PART2" :@VM: "HANDS DETS2 PART 3" :@SVM: "HANDS DETS2 PART4"
+      EXP.OH.NOT.BETWEEN :=@AM: "11:00" :@VM: "11:30"
+      EXP.OH.NOT.BEFORE :=@AM: "09:00"
+      EXP.OH.NOT.AFTER :=@AM: "15:00"
+      EXP.OH.BAN.VEHICLE :=@AM: "BAN VEHICLE 2"
+      EXP.OH.REQ.VEHICLE :=@AM: "REQ VEHICLE 2"
+      EXP.OH.REQ.VEHICLE.REG :=@AM: "REQ VEHICLE REG 2"
+
+      OH.CUST.MOBILE = EXP.OH.CUST.MOBILE<2>
+      OH.CUST.MOBILE.2 = EXP.OH.CUST.MOBILE.2<2>
+      OH.ALERT.EMAIL.ADDRESS = EXP.OH.ALERT.EMAIL.ADDRESS<2>
+      OH.COLLECTED = EXP.OH.COLLECTED<2>
+      OH.EPOD.EMAIL.ADDRESS = EXP.OH.EPOD.EMAIL.ADDRESS<2>
+      OH.EMAIL.NOTIFICATION = EXP.OH.EMAIL.NOTIFICATION<2>
+      OH.EPOD.PER.TKT.SIG = EXP.OH.EPOD.PER.TKT.SIG<2>
+      OH.DELIVERY.SLOT = EXP.OH.DELIVERY.SLOT<2>
+      OH.TIP.TIME = EXP.OH.TIP.TIME<2> * 60
+      OH.HEALTH.SAFETY.INDS = EXP.OH.HEALTH.SAFETY.INDS<2>
+      OH.HEALTH.SAFETY.DETS = EXP.OH.HEALTH.SAFETY.DETS<2>
+      OH.NOT.BETWEEN = EXP.OH.NOT.BETWEEN<2>
+      OH.NOT.BEFORE = EXP.OH.NOT.BEFORE<2>
+      OH.NOT.AFTER = EXP.OH.NOT.AFTER<2>
+      OH.BAN.VEHICLE = EXP.OH.BAN.VEHICLE<2>
+      OH.REQ.VEHICLE = EXP.OH.REQ.VEHICLE<2>
+      OH.REQ.VEHICLE.REG = EXP.OH.REQ.VEHICLE.REG<2>
+
+      OH.DELIV.LOAD.TIMES.RESTRICTIONS = ""
+      BITS.WORK = EXP.OH.CUST.MOBILE<1> :@AM: EXP.OH.CUST.MOBILE.2<1>
+      BITS.WORK := @AM: EXP.OH.ALERT.EMAIL.ADDRESS<1> :@AM: EXP.OH.COLLECTED<1>
+      BITS.WORK := @AM: EXP.OH.EPOD.EMAIL.ADDRESS<1> :@AM: EXP.OH.EPOD.PER.TKT.SIG<1>
+      BITS.WORK := @AM: EXP.OH.DELIVERY.SLOT<1> :@AM: (EXP.OH.TIP.TIME<1> * 60) :@AM: EXP.OH.HEALTH.SAFETY.INDS<1>
+      BITS.WORK := @AM: EXP.OH.HEALTH.SAFETY.DETS<1> :@AM: EXP.OH.NOT.BETWEEN<1>
+      BITS.WORK := @AM: EXP.OH.NOT.BEFORE<1> :@AM: EXP.OH.NOT.AFTER<1>
+      BITS.WORK := @AM: EXP.OH.BAN.VEHICLE<1> :@AM: EXP.OH.REQ.VEHICLE<1>
+      BITS.WORK := @AM: EXP.OH.REQ.VEHICLE.REG<1>
+      BITS.WORK = LOWER(BITS.WORK)
+      BITS.WORK = LOWER(BITS.WORK)
+      OH.DELIV.LOAD.TIMES.RESTRICTIONS<1> = BITS.WORK
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      JOB.CUST.MOBILE.PHONE = EXP.OH.CUST.MOBILE<2,1>
+      JOB.CUST.WORK.PHONE = EXP.OH.CUST.MOBILE.2<2,1>
+      JOB.CUST.EPOD.EMAIL = EXP.OH.EMAIL.NOTIFICATION<2>
+      JOB.NOTES = CHANGE(EXP.OH.HEALTH.SAFETY.DETS<2>, @SVM, " ")
+
+      JOB.WINDOW.EARLIEST.DATE = "20200407"
+      JOB.WINDOW.EARLIEST.TIME = EXP.OH.NOT.BEFORE<2>[1,2]:EXP.OH.NOT.BEFORE<2>[4,2]
+      JOB.WINDOW.LATEST.DATE = "20200407"
+      JOB.WINDOW.LATEST.TIME = EXP.OH.NOT.AFTER<2>[1,2]:EXP.OH.NOT.AFTER<2>[4,2]
+      JOB.WINDOW.EXCLUSION.START.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.START.TIME = EXP.OH.NOT.BETWEEN<2,1>[1,2]:EXP.OH.NOT.BETWEEN<2,1>[4,2]
+      JOB.WINDOW.EXCLUSION.END.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.END.TIME = EXP.OH.NOT.BETWEEN<2,2>[1,2]:EXP.OH.NOT.BETWEEN<2,2>[4,2]
+      JOB.MINUTES.ALLOWED.FOR.DELIVERY = EXP.OH.TIP.TIME<2>
+      JOB.EPOD.PER.TKT.SIG = @FALSE
+      JOB.INSTRUCTIONS = "Required vehicle registration on this site is " : EXP.OH.REQ.VEHICLE.REG<2>
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @FALSE
+
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, WANT.ERROR)
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", JOB.INDICATORS.SPECIAL.CONDITIONS, WANT.ERROR)
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashSecondSplitOrig:
+********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Original Cash order split twice"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75150-1*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "3"
+      JOB.LINE.WEIGHT = "10"
+
+      JOB.CONTACT.SMS = "BBBBBBBB"
+      JOB.CUST.MOBILE.PHONE = "22222222"
+      JOB.CUST.WORK.PHONE = "11111111"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashSecondSplitPrior:
+*********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Prior Cash order split twice"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75150-2*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "2"
+      JOB.LINE.WEIGHT = "10"
+
+      JOB.CONTACT.SMS = "BBBBBBBB"
+      JOB.CUST.MOBILE.PHONE = "22222222"
+      JOB.CUST.WORK.PHONE = ""
+      ARRAY.OF.VALID.LINE.NBRS = "" :@AM: "1"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashSecondSplitLatest:
+**********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Latest Cash order split twice"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75150-3*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "7"
+      JOB.LINE.WEIGHT = "0"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = "" :@AM:@AM: "1"
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashThirdSplitOrig:
+*******************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Original Cash order split 3 times"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75160-1*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "4"
+      JOB.LINE.WEIGHT = "0"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashThirdSplitPrior2:
+*********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for second Prior Cash order split 3 times"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75160-2*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "1"
+      JOB.LINE.WEIGHT = "0"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = "" :@AM: "1"
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashThirdSplitPrior:
+********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Prior Cash order split 3 times"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75160-3*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "5"
+      JOB.LINE.WEIGHT = "0"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = "" :@AM:@AM: "1"
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashThirdSplitLatest:
+*********************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Latest Cash order split 3 times"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75160-4*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = "4"
+      JOB.LINE.WEIGHT = "0"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = "0"
+      EXPECTED.JOB.DATA = JOB.DATA
+      ARRAY.OF.VALID.LINE.NBRS = "" :@AM:@AM:@AM: "1"
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataCashThirdSplitLatestZeroBalance:
+********************************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated correctly for Latest Cash order split 3 times with zero balance"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*B75170-4*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY
+      GOSUB SET.JOB.LINE.DIMENSIONS.TO.0
+
+      JOB.LINE.QUANTITY = ""
+      JOB.LINE.WEIGHT = ""
+      JOB.LINE.ORIGINATOR.KEY = ""
+      JOB.LINE.PRODUCT.CODE = ""
+      JOB.LINE.BARCODE = ""
+      JOB.LINE.INDICATOR = ""
+      JOB.LINE.UOM = ""
+      JOB.LINE.DELIVERY.OR.COLLECTION = ""
+      JOB.LINE.LENGTH = ""
+      JOB.LINE.DEPTH = ""
+      JOB.LINE.WIDTH = ""
+      JOB.LINE.DESCRIPTION = ""
+      JOB.LINE.DISPLAY.NUMBER = ""
+      JOB.LINE.RESTRICTED = ""
+      JOB.LINE.PRODUCT.SCAN.COUNT = ""
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldUpdateCOSTCENTREWithBranchIfNotRemote:
+********************************************
+
+      TEST.PRINT = "Should update JOB.SALES.COST.CENTRE with branch if not remote ticket"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12346*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldUpdateHSQuestionsOldWay:
+******************************
+
+      TEST.PRINT = "Should update Health And Safety Questions Old Way"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12347*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct HS data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldSetHSHazardsToFalse:
+**************************
+
+      TEST.PRINT = "Should update Health And Safety Hazards To False"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12348*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct HS data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldUpdatePodSignature:
+*************************
+
+      TEST.PRINT = "Should update POD signature to True"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12348*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+      GOSUB SAVE.RESTRICTIONS
+
+      OH.EPOD.PER.TKT.SIG = "Y"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct HS data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidLatestTime:
+****************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with a valid latest time"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS
+      GOSUB SETUP.DIMENSIONS.WANTS
+
+      OH.DELIVERY.SLOT = "001"
+      OH.NOT.BEFORE = 3600
+      OH.NOT.AFTER = 7200
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      FROM.TIME = 25200
+      TO.TIME = 46800
+      GOSUB WRITE.BS.DELIVERY.SLOTS
+
+      JOB.WINDOW.EARLIEST.TIME = "0700"
+      JOB.WINDOW.LATEST.TIME = "1300"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with line 1"
+      EXPECTED.RESULT = "TURN LEFT"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.INSTRUCTION.LINE.1", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with line 2"
+      EXPECTED.RESULT = "TURN RIGHT"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.INSTRUCTION.LINE.2", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with delivery slot of 001"
+      EXPECTED.RESULT = "001"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.DELIVERY.SLOT", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXAttributesForTicket:
+***************************************
+
+      TEST.PRINT = "Should return mv array JOB.DATA populated with a BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type for a ticket"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      OH.SHOWROOM.SALE = "Y"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      JOB.INSTRUCTIONS = ""
+      JOB.SERVICE.LEVEL = "BMXPRM"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", "1", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = "ABC123"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldNotReturnWithBMXDetailsForShroomFlgSetTicket:
+***************************************************
+
+      TEST.PRINT = "Should not return JOB.DATA populated with BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type for TP ticket with showroom flag set"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      OH.SHOWROOM.SALE = "Y"
+      OH.REQ.VEHICLE = "B"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      JOB.INSTRUCTIONS = "Required vehicle type on this site is TRANSIT VAN"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "TP", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", "1", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = "B"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldNotReturnWithBMXDetailsShroomFlgNotSetTicket:
+***************************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with vehicle type instructions, showroom flag not set"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      OH.REQ.VEHICLE = "B"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      JOB.INSTRUCTIONS = "Required vehicle type on this site is TRANSIT VAN"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", "1", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = "B"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXDetailsForIBTFromTicket:
+*******************************************
+
+      TEST.PRINT = "Should return IBT JOB.DATA with BMX details in service level,"
+      TEST.PRINT := ", job type and vehicle type from a ticket"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      OH.CT.ORD.NO = "F12340"
+      CUST.CODE = "0123"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      ORD.HEAD.KEY = OH.CT.ORD.NO[6,1] : OH.CT.ORD.NO[1,1] : CUST.CODE : OH.CT.ORD.NO[2,4]
+      MAT ORDER.HEADER.REC = ""
+      OH.SHOWROOM.SALE = "Y"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORD.HEAD.KEY
+
+      JOB.INSTRUCTIONS = "Required vehicle type on this site is BMX VAN"
+      JOB.CUSTOMER.ORDER.REF = "F12340"
+      JOB.SERVICE.LEVEL = "BMXSTD"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.CUST.ACCOUNT.ID = "0123"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldNotReturnWithBMXDetailsIBTFromTicketShroomFlgSet:
+*******************************************************
+
+      TEST.PRINT = "Should not return IBT JOB.DATA with BMX details derived from a ticket, same branch, showroom flag set"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      OH.CT.ORD.NO = "F12340"
+      CUST.CODE = "0123"
+      OH.REQ.VEHICLE = "B"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      ORD.HEAD.KEY = OH.CT.ORD.NO[6,1] : OH.CT.ORD.NO[1,1] : CUST.CODE : OH.CT.ORD.NO[2,4]
+      MAT ORDER.HEADER.REC = ""
+      OH.SHOWROOM.SALE = "Y"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORD.HEAD.KEY
+
+      JOB.INSTRUCTIONS = "Required vehicle type on this site is TRANSIT VAN"
+      JOB.CUSTOMER.ORDER.REF = "F12340"
+      JOB.CUST.ACCOUNT.ID = "0123"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "TP", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = "B"
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXDetailsForIBTFromTicketDiffBranch:
+*****************************************************
+
+      TEST.PRINT = "Should return IBT JOB.DATA with BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type for ticket from a different branch"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      ORDER.BRANCH = "1234"
+
+      OH.CT.ORD.NO = "F12340"
+      CUST.CODE = ORDER.BRANCH
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      ORD.HEAD.KEY = OH.CT.ORD.NO[6,1] : OH.CT.ORD.NO[1,1] : CUST.CODE : OH.CT.ORD.NO[2,4]
+      MAT ORDER.HEADER.REC = ""
+      OH.SHOWROOM.SALE = "Y"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORD.HEAD.KEY
+
+      MAT BRN.DETAIL.REC = ""
+      BRN.MAILBOX = "JANE.SMITH"
+      BRN.BRAND.PARENT.EMAIL = "@MAIL.COM"
+      BRN.ACCT.NME = "ORDER-ACCT"
+      BRN.MACH.NME = "ORDER-MACH"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, ORDER.BRANCH
+
+      JOB.INSTRUCTIONS = ""
+      JOB.SERVICE.LEVEL = "BMXSTD"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.CUSTOMER.ORDER.REF = "F12340"
+      JOB.CUST.ACCOUNT.ID = ORDER.BRANCH
+      JOB.CUST.EPOD.EMAIL = "JANE.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, 1, "ORDER-HEADER", "", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = ORDER.BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER called twice"
+      EXPECTED.RESULT = 2
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "CREATE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "ORDER-ACCT"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "ORDER-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "DELETE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "ORDER-ACCT"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "ORDER-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = "ORDER-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldNotReturnWithBMXDetailsIBTFromTicketDiffBranchErr:
+********************************************************
+
+      TEST.PRINT = "Should not return IBT JOB.DATA with BMX details derived from a ticket, different branch"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      ORDER.BRANCH = "1234"
+
+      OH.CT.ORD.NO = "F12340"
+      CUST.CODE = ORDER.BRANCH
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      ORD.HEAD.KEY = OH.CT.ORD.NO[6,1] : OH.CT.ORD.NO[1,1] : CUST.CODE : OH.CT.ORD.NO[2,4]
+      MAT ORDER.HEADER.REC = ""
+      OH.SHOWROOM.SALE = "Y"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORD.HEAD.KEY
+
+      MAT BRN.DETAIL.REC = ""
+      BRN.MAILBOX = "JANE.SMITH"
+      BRN.BRAND.PARENT.EMAIL = "@MAIL.COM"
+      BRN.ACCT.NME = "ORDER-ACCT"
+      BRN.MACH.NME = "ORDER-MACH"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, ORDER.BRANCH
+
+      JOB.CUSTOMER.ORDER.REF = "F12340"
+      JOB.CUST.ACCOUNT.ID = ORDER.BRANCH
+      JOB.CUST.EPOD.EMAIL = "JANE.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, 1, "ORDER-HEADER", "", "")
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "ERR.MSG", 1, 1, "Error", "", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "CREATE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "ORDER-ACCT"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "ORDER-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldNotReturnWithBMXInstructionsIBTFromPoNoOrder:
+***************************************************
+
+      TEST.PRINT = "Should not return IBT JOB.DATA with BMX details in instructions derived from a PO, no linked order"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      OH.CT.ORD.NO = "012312345"
+      CUST.CODE = "0123"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT PO.HEADER.REC = ""
+      PH.NO.LINES = 1
+      PO.HEAD.KEY = "0123*12345"
+      MATWRITE PO.HEADER.REC TO PO.HEADER.FV, PO.HEAD.KEY
+
+      MAT PO.LINE.REC = ""
+      POL.SALES.ATTACHED = ""
+      PO.LINE.KEY = "001*0123*12345"
+      MATWRITE PO.LINE.REC TO PO.LINE.FV, PO.LINE.KEY
+
+      JOB.CUSTOMER.ORDER.REF = "012312345"
+      JOB.CUST.ACCOUNT.ID = "0123"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXDetailsForIBTFromPoLinkedOrderSameBranch:
+************************************************************
+
+      TEST.PRINT = "Should return IBT JOB.DATA with BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type when linked order is on the same machine"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      ORDER.BRANCH = "0123"
+
+      OH.CT.ORD.NO = "12345"
+      CUST.CODE = ORDER.BRANCH
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT PO.HEADER.REC = ""
+      PH.NO.LINES = 1
+      PO.HEAD.KEY = "0123*12345"
+      MATWRITE PO.HEADER.REC TO PO.HEADER.FV, PO.HEAD.KEY
+
+      MAT PO.LINE.REC = ""
+      POL.SALES.ATTACHED = "0010F01231234"
+      PO.LINE.KEY = "001*0123*12345"
+      MATWRITE PO.LINE.REC TO PO.LINE.FV, PO.LINE.KEY
+
+      MAT ORDER.HEADER.REC = ""
+      OH.SHOWROOM.SALE = "Y"
+      ORD.HEAD.KEY = "0F01231234"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORD.HEAD.KEY
+
+      JOB.CUSTOMER.ORDER.REF = "12345"
+      JOB.INSTRUCTIONS = ""
+      JOB.SERVICE.LEVEL = "BMXSTD"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.CUST.ACCOUNT.ID = ORDER.BRANCH
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = ORDER.BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXDetailsForIBTFromPoLinkedOrderDiffMachine:
+*************************************************************
+
+      TEST.PRINT = "Should return IBT JOB.DATA with BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type when linked order is on a different machine"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      IBT.BRANCH = "0123"
+      PO.BRANCH = IBT.BRANCH
+
+      OH.CT.ORD.NO = "12345"
+      CUST.CODE = PO.BRANCH
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT PO.HEADER.REC = ""
+      PH.NO.LINES = 1
+      PO.HEAD.KEY = "0123*12345"
+      MATWRITE PO.HEADER.REC TO PO.HEADER.FV, PO.HEAD.KEY
+
+      MAT PO.LINE.REC = ""
+      POL.SALES.ATTACHED = "0010F12349999"
+      PO.LINE.KEY = "001*" : PO.HEAD.KEY
+      MATWRITE PO.LINE.REC TO PO.LINE.FV, PO.LINE.KEY
+
+      ORDER.BRANCH = "1234"
+
+      MAT BRN.DETAIL.REC = ""
+      BRN.ACCT.NME = "ORDER-ACCT"
+      BRN.MACH.NME = "ORDER-MACH"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, ORDER.BRANCH
+
+      MAT ORDER.HEADER.REC = ""
+      OH.SHOWROOM.SALE = "Y"
+      ORD.HEAD.KEY = "0F12349999"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORD.HEAD.KEY
+
+      JOB.CUSTOMER.ORDER.REF = "12345"
+      JOB.INSTRUCTIONS = ""
+      JOB.SERVICE.LEVEL = "BMXSTD"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.CUST.ACCOUNT.ID = IBT.BRANCH
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, 1, "ORDER-HEADER", "", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = ORDER.BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER called twice"
+      EXPECTED.RESULT = 2
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "CREATE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "ORDER-ACCT"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "ORDER-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "DELETE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = "ORDER-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXDetailsForIBTFromPoLinkedDocHistDiffMachine:
+***************************************************************
+
+      TEST.PRINT = "Should return IBT JOB.DATA with BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type when linked doc hist is on a different machine"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      ORDER.BRANCH = "1234"
+
+      MAT BRN.DETAIL.REC = ""
+      BRN.ACCT.NME = "ORDER-ACCT"
+      BRN.MACH.NME = "ORDER-MACH"
+      BRN.MAILBOX = "JANE.SMITH"
+      BRN.BRAND.PARENT.EMAIL = "@MAIL.COM"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, ORDER.BRANCH
+
+      OH.PO.NO = "12345"
+      CUST.CODE = ORDER.BRANCH
+      OH.CT.ORD.NO = ""
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT PO.HEADER.REC = ""
+      PH.NO.LINES = 1
+      PO.HEAD.KEY = ORDER.BRANCH : "*12345"
+      MATWRITE PO.HEADER.REC TO PO.HEADER.FV, PO.HEAD.KEY
+
+      MAT PO.LINE.REC = ""
+      POL.SALES.ATTACHED = "2101|1234|B12345/19497|C|001"
+      PO.LINE.KEY = "001*" : PO.HEAD.KEY
+      MATWRITE PO.LINE.REC TO PO.LINE.FV, PO.LINE.KEY
+
+      DOC.HIST.REC = ""
+      DOC.HIST.REC<206> = "Y"
+      DOC.HIST.KEY = FIELD(POL.SALES.ATTACHED, "|", 1, 4)
+      WRITE DOC.HIST.REC TO DOC.HIST.FV, DOC.HIST.KEY
+
+      JOB.CUSTOMER.ORDER.REF = ""
+      JOB.INSTRUCTIONS = ""
+      JOB.SERVICE.LEVEL = "BMXSTD"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.CUST.ACCOUNT.ID = ORDER.BRANCH
+      JOB.CUST.EPOD.EMAIL = "JANE.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, 1, "PO-HEADER", "", "")
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 2, 2, "PO-LINE", "", "")
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 3, 3, "DOCUMENT-HISTORY-2101", "", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = ORDER.BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER called six times"
+      EXPECTED.RESULT = 6
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "CREATE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "STOCK"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "PO-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "CREATE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "STOCK"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "PO-LINE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 2, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "CREATE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER correct MACHINE"
+      EXPECTED.RESULT = "ORDER-MACH"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "MACHINE", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with ACCOUNT"
+      EXPECTED.RESULT = "EODGROUP"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACCOUNT", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with FILENAME"
+      EXPECTED.RESULT = "DOCUMENT-HISTORY-2101"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "FILENAME", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 3, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "DELETE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 4, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = "DOCUMENT-HISTORY-2101"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 4, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "DELETE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 5, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = "PO-LINE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 5, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with correct ACTION"
+      EXPECTED.RESULT = "DELETE"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "ACTION", 6, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "Should call CREATE.TEMP.QPOINTER with QPOINTER"
+      EXPECTED.RESULT = "PO-HEADER"
+      ACTUAL.RESULT = MOCK.GET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 6, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnWithBMXDetailsForIBTFromPoLinkedDocHistSameMachine:
+***************************************************************
+
+      TEST.PRINT = "Should return IBT JOB.DATA with BMX details in service level,"
+      TEST.PRINT := " job type and vehicle type when linked doc hist is on the same machine"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*M12345*v01*0123"
+      DELIV.MAN.BRANCH = @FALSE
+      GOSUB SETUP
+
+      ORDER.BRANCH = "1234"
+
+      MAT BRN.DETAIL.REC = ""
+      BRN.ACCT.NME = "ORDER-ACCT"
+      BRN.MACH.NME = "IBT-MACH"
+      BRN.MAILBOX = "JANE.SMITH"
+      BRN.BRAND.PARENT.EMAIL = "@MAIL.COM"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, ORDER.BRANCH
+
+      OH.PO.NO = "12345"
+      CUST.CODE = ORDER.BRANCH
+      OH.CT.ORD.NO = ""
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT PO.HEADER.REC = ""
+      PH.NO.LINES = 1
+      PO.HEAD.KEY = ORDER.BRANCH : "*12345"
+      MATWRITE PO.HEADER.REC TO PO.HEADER.FV, PO.HEAD.KEY
+
+      MAT PO.LINE.REC = ""
+      POL.SALES.ATTACHED = "2101|1234|B12345/19497|C|001"
+      PO.LINE.KEY = "001*" : PO.HEAD.KEY
+      MATWRITE PO.LINE.REC TO PO.LINE.FV, PO.LINE.KEY
+
+      DOC.HIST.REC = ""
+      DOC.HIST.REC<206> = "Y"
+      DOC.HIST.KEY = FIELD(POL.SALES.ATTACHED, "|", 1, 4)
+      WRITE DOC.HIST.REC TO DOC.HIST.FV, DOC.HIST.KEY
+
+      JOB.CUSTOMER.ORDER.REF = ""
+      JOB.INSTRUCTIONS = ""
+      JOB.SERVICE.LEVEL = "BMXSTD"
+      JOB.TYPE.REF = "BMXJOB"
+      JOB.VEHICLE.TYPE = "BMX"
+      JOB.CUST.ACCOUNT.ID = ORDER.BRANCH
+      JOB.CUST.EPOD.EMAIL = "JANE.SMITH@MAIL.COM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "BMX", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @FALSE, WANT.ERROR)
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 1, 1, "PO-HEADER", "", "")
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 2, 2, "PO-LINE", "", "")
+      CALL MOCK.SET(CREATE.TEMP.QPOINTER.MOCK, "QPOINTER", 3, 3, "DOCUMENT-HISTORY-2101", "", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called once"
+      EXPECTED.RESULT = 1
+      ACTUAL.RESULT = MOCK.CALLED(GET.ORDER.BRAND.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with BEAMISH.SET = 'Y'"
+      EXPECTED.RESULT = "Y"
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "BEAMISH.SET", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "GET.ORDER.BRAND called with correct COST.CENTRE"
+      EXPECTED.RESULT = ORDER.BRANCH
+      ACTUAL.RESULT = MOCK.GET(GET.ORDER.BRAND.MOCK, "COST.CENTRE", 1, "", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "DELIV.MAN.GET.INSTRUCTIONS called with correct VEHICLE.TYPE"
+      EXPECTED.RESULT = ""
+      ACTUAL.RESULT = MOCK.WAS(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "IN.RQD.VEHICLE.TYPE", "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      ASSERT.PRINT = "CREATE.TEMP.QPOINTER not called"
+      EXPECTED.RESULT = 0
+      ACTUAL.RESULT = MOCK.CALLED(CREATE.TEMP.QPOINTER.MOCK, "")
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataForTPJob:
+**********************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with correct service level"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      DELIVERY.ID = "19091*F12345*v01*0123"
+      BRANCH = "0123"
+      DELIV.MAN.BRANCH = @TRUE
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      BRN.HAVE.I.GOT.A.SHOWROOM = "Y"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, BRANCH
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", "1", "")
+      CALL MOCK.WANT(GET.ORDER.BRAND.MOCK, "SHORT.BRAND", "TP", "")
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct order data"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidScanCountIfAllWithinPOCCriteria:
+*************************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with correct scan count"
+      TEST.PRINT := " when customer product post code within POC criteria"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      PRODUCT.PROVENANCE.REC = ""
+      PRODUCT.PROVENANCE.REC<1> = "AB4567"
+      PRODUCT.PROVENANCE.REC<2> = "SW1A 1AA"
+      PRODUCT.PROVENANCE.REC<3> = "123456"
+      PRODUCT.PROVENANCE.REC<4> = "3"
+      PRODUCT.PROVENANCE.REC<5> = "EA"
+      PRODUCT.PROVENANCE.REC<6> = "T"
+      WRITE PRODUCT.PROVENANCE.REC TO SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC"
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+
+      JOB.LINE.PRODUCT.SCAN.COUNT = 1
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+      ASSERT.PRINT = "JOB.DATA array contains the correct scan count when customer postcode product within POC criteria"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnZeroScanCountIfCustomerNotinPOCCriteria:
+****************************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with Zero Scan Count"
+      TEST.PRINT := " when CUSTOMER not in the POC criteria"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      PRODUCT.PROVENANCE.REC = ""
+      PRODUCT.PROVENANCE.REC<1> = "BB4567"
+      PRODUCT.PROVENANCE.REC<2> = "SW1A 1AA"
+      PRODUCT.PROVENANCE.REC<3> = "123456"
+      PRODUCT.PROVENANCE.REC<4> = "3"
+      PRODUCT.PROVENANCE.REC<5> = "EA"
+      PRODUCT.PROVENANCE.REC<6> = "T"
+      WRITE PRODUCT.PROVENANCE.REC TO SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC"
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains zero scan count when customer not in POC criteria"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnZeroScanCountIfPostCodeNotinPOCCriteria:
+****************************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with Zero Scan Count"
+      TEST.PRINT := " when POST.CODE not in the POC criteria"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      PRODUCT.PROVENANCE.REC = ""
+      PRODUCT.PROVENANCE.REC<1> = "AB4567"
+      PRODUCT.PROVENANCE.REC<2> = "SS1A 1AA"
+      PRODUCT.PROVENANCE.REC<3> = "123456"
+      PRODUCT.PROVENANCE.REC<4> = "3"
+      PRODUCT.PROVENANCE.REC<5> = "EA"
+      PRODUCT.PROVENANCE.REC<6> = "T"
+      WRITE PRODUCT.PROVENANCE.REC TO SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC"
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains zero scan count when postcode not in POC criteria"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnZeroScanCountIfProductOutsidePOC:
+*********************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with Zero Scan Count"
+      TEST.PRINT := " when PRODUCT.CODE not in the POC criteria"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      PRODUCT.PROVENANCE.REC = ""
+      PRODUCT.PROVENANCE.REC<1> = "AB4567"
+      PRODUCT.PROVENANCE.REC<2> = "SW1A 1AA"
+      PRODUCT.PROVENANCE.REC<3> = "113456"
+      PRODUCT.PROVENANCE.REC<4> = "3"
+      PRODUCT.PROVENANCE.REC<5> = "EA"
+      PRODUCT.PROVENANCE.REC<6> = "T"
+      WRITE PRODUCT.PROVENANCE.REC TO SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC"
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains zero scan count when product code is outside POC"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnValidJobDataForTPJobWhenUOMsDifferent:
+**************************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with correct scan count"
+      TEST.PRINT := " when UOMs are different between the order line and the POC parameter"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      PRODUCT.PROVENANCE.REC = ""
+      PRODUCT.PROVENANCE.REC<1> = "AB4567"
+      PRODUCT.PROVENANCE.REC<2> = "SW1A 1AA"
+      PRODUCT.PROVENANCE.REC<3> = "123456"
+      PRODUCT.PROVENANCE.REC<4> = "3"
+      PRODUCT.PROVENANCE.REC<5> = "PK"
+      PRODUCT.PROVENANCE.REC<6> = "T"
+      WRITE PRODUCT.PROVENANCE.REC TO SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC"
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 1
+
+      PF.MST.MAIN.UOM = "EA"
+      PF.MST.ALT.UOM = "PK"
+      PF.MST.ALT.UOM.FACT = 10000
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, OL.PROD.CODE
+
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the correct scan count when it is in POC criteria but with different UOMs "
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+ShouldReturnZeroScanCountIfBranchBrandNotinPOCCriteria:
+*******************************************************
+
+      TEST.PRINT = "Should return JOB.DATA populated with zero scan count"
+      TEST.PRINT := " when BRANCH.BRAND not in the POC criteria"
+      GOSUB CALL.ANNOUNCE.TEST.CASE
+
+      GOSUB SETUP
+      GOSUB SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS
+
+      PRODUCT.PROVENANCE.REC = ""
+      PRODUCT.PROVENANCE.REC<1> = "AB4567"
+      PRODUCT.PROVENANCE.REC<2> = "SW1A 1AA"
+      PRODUCT.PROVENANCE.REC<3> = "123456"
+      PRODUCT.PROVENANCE.REC<4> = "3"
+      PRODUCT.PROVENANCE.REC<5> = "PK"
+      PRODUCT.PROVENANCE.REC<6> = "S"
+      WRITE PRODUCT.PROVENANCE.REC TO SY.PARAMS.FV, "PRODUCT.PROVENANCE.POC"
+
+
+      JOB.SERVICE.LEVEL = "TPDELPRM"
+      JOB.LINE.RESTRICTED = @FALSE
+      JOB.LINE.PRODUCT.SCAN.COUNT = 0
+
+      EXPECTED.JOB.DATA = JOB.DATA
+
+      JOB.DATA = ""
+
+      GOSUB DO.CALL
+
+      ASSERT.PRINT = "JOB.DATA array contains the zero scan count when Branch Brand is outside POC"
+      EXPECTED.RESULT = EXPECTED.JOB.DATA
+      ACTUAL.RESULT = JOB.DATA
+      GOSUB CALL.ASSERT.EQUALS
+
+      GOSUB TEAR.DOWN
+
+      RETURN
+
+**************************************************************************
+SETUP:
+******
+
+      CALL BS.OE.TICKET.CLEAR.COMMON
+
+      ORDER.TYPE = DELIVERY.ID[7,1]
+      ORDER.NUMBER.FULL = FIELD(DELIVERY.ID, "*", 2)
+      ORDER.NUMBER = FIELD(ORDER.NUMBER.FULL, "-", 1)
+      BRANCH = FIELD(DELIVERY.ID, "*", 4)
+      ERROR.MESSAGE = ""
+
+      GOSUB WRITE.BRN.DETAIL
+
+      BEGIN CASE
+         CASE ORDER.TYPE = "F"
+            GOSUB WRITE.ACCOUNT.ORDER.HEADER
+            GOSUB WRITE.HO.CUSTOMER
+         CASE ORDER.TYPE = "B"
+            GOSUB WRITE.CASH.ORDER.HEADER
+         CASE ORDER.TYPE = "M"
+            GOSUB WRITE.IBT.ORDER.HEADER
+      END CASE
+
+      GOSUB POPULATE.ORDER.LINE.IN.COMMON
+
+      FROM.TIME = 36000
+      TO.TIME = 36600
+      GOSUB WRITE.BS.DELIVERY.SLOTS
+
+      GOSUB WRITE.PF.PRODUCT.MASTER
+
+      GOSUB BUILD.EXPECTED.JOB.DATA
+
+      CALL MOCK.WANT(BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS.MOCK, "POSTCODE", "SW1A 1AA", "")
+      CALL MOCK.WANT(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "ADDRESS.HASH", "186C4E560721B5E0AF02E408AEC3A86E", "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.ERROR.MESSAGE", "", WANT.ERROR)
+
+      MODE = "LIVE"
+      PASSED.ORDER.HEADER.FV = ""
+      PASSED.ORDER.LINE.FV = ""
+      ARRAY.OF.VALID.LINE.NBRS = 1
+
+      RETURN
+
+**************************************************************************
+SETUP.GET.INSTRUCTIONS.AND.DIMENSIONS.WANTS:
+********************************************
+      GOSUB SETUP.GET.INSTRUCTIONS.WANTS
+      GOSUB SETUP.DIMENSIONS.WANTS
+      RETURN
+
+**************************************************************************
+SETUP.GET.INSTRUCTIONS.WANTS:
+*****************************
+
+      JOB.INSTRUCTIONS = "TURN LEFT" : @VM : "TURN RIGHT"
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @TRUE
+      GOSUB DO.WANTS.FOR.INSTRUCTIONS
+      RETURN
+
+**************************************************************************
+SETUP.GET.INSTRUCT.AND.DIM.WANTS.FOR.IBT:
+*****************************************
+
+      JOB.INSTRUCTIONS = "POT HOLES!"
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @FALSE
+      GOSUB DO.WANTS.FOR.INSTRUCTIONS
+      GOSUB SETUP.DIMENSIONS.WANTS
+      RETURN
+
+**************************************************************************
+SETUP.GET.INSTRUCTIONS.WANTS.FALSE.AND.EMPTY:
+*********************************************
+
+      JOB.INSTRUCTIONS = ""
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @FALSE
+      GOSUB DO.WANTS.FOR.INSTRUCTIONS
+      RETURN
+
+**************************************************************************
+DO.WANTS.FOR.INSTRUCTIONS:
+**************************
+
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, WANT.ERROR)
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", JOB.INDICATORS.SPECIAL.CONDITIONS, WANT.ERROR)
+
+      RETURN
+
+**************************************************************************
+SETUP.DIMENSIONS.WANTS:
+***********************
+      LENGTH.IN.MM = 190650
+      WIDTH.IN.MM = 10
+      DEPTH.IN.MM = 10
+      GOSUB DO.WANTS.FOR.DIMENSIONS
+      RETURN
+
+**************************************************************************
+DO.WANTS.FOR.DIMENSIONS:
+************************
+
+      CALL MOCK.WANT(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK,
+         "OUT.LENGTH.IN.MM", LENGTH.IN.MM, WANT.ERROR)
+      CALL MOCK.WANT(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK,
+         "OUT.WIDTH.IN.MM", WIDTH.IN.MM, WANT.ERROR)
+      CALL MOCK.WANT(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK,
+         "OUT.DEPTH.IN.MM", DEPTH.IN.MM, WANT.ERROR)
+      RETURN
+
+**************************************************************************
+SET.JOB.LINE.DIMENSIONS.TO.0:
+*****************************
+      JOB.LINE.LENGTH = 0
+      JOB.LINE.DEPTH = 0
+      JOB.LINE.WIDTH = 0
+      RETURN
+
+**************************************************************************
+WRITE.ACCOUNT.ORDER.HEADER:
+***************************
+
+      MAT ORDER.HEADER.REC = ""
+      NO.OF.LINES = 1
+      OH.NATIONAL.CREATOR = "5678" :@VM: "FRED"
+
+      OH.REQ.VEHICLE = "ABC123"
+      OH.HEALTH.SAFETY.DETS = "WATCH OUT"
+      OH.DELIVERY.SLOT = "001"
+      DELIV.INST.1 = "TURN LEFT"
+      DELIV.INST.2 = "TURN RIGHT"
+      OH.CT.ORD.NO = "2345DEXX"
+
+      CUST.CODE = "AB4567"
+      CUST.NAME = "JOHN SMITH"
+      OH.CUST.TEL = "01234567890"
+      OH.CUST.MOBILE<1,1> = "07754768012"
+      OH.CUST.MOBILE<1,3> = "Y"
+      OH.CUST.MOBILE.2<1,1> = "07754777777"
+      OH.EPOD.EMAIL.ADDRESS = "JOHN.SMITH@MAIL.COM"
+      OH.CUST.NAME = "JOHN SMITH JR"
+      CUST.ADDR.1 = "14"
+      CUST.ADDR.2 = "MAIN STREET"
+      CUST.ADDR.3 = "NICE TERRACE"
+      CUST.ADDR.4 = "LONDON"
+      OH.DELIV.ALT.ADDRESS = "14" :@VM: "MAIN STREET" :@VM: "NICE TERRACE" :@VM: "LONDON" :@VM: "SW1 1AA"
+      DELIV.DATE = 19091
+      OH.NOT.BEFORE = 36000
+      OH.NOT.AFTER = 57600
+      OH.NOT.BETWEEN<1,1> = 43200
+      OH.NOT.BETWEEN<1,2> = 46800
+      OH.TIP.TIME = 1080
+      OH.ORD.DATE = 19100
+
+      IF ORDER.NUMBER.FULL = "F12346" THEN
+         OH.NATIONAL.CREATOR = ""
+      END
+
+      IF ORDER.NUMBER.FULL = "F12347" THEN
+         OH.NATIONAL.CREATOR = ""
+         OH.HEALTH.SAFETY.INDS = "N" : @VM : "Y"
+         OH.HEALTH.SAFETY.DETS = ""
+      END
+
+      IF ORDER.NUMBER.FULL = "F12348" THEN
+         OH.NATIONAL.CREATOR = ""
+         OH.HEALTH.SAFETY.INDS = "N" : @VM : "N"
+         OH.HEALTH.SAFETY.DETS = ""
+      END
+
+      ORDER.HEADER.KEY = ORDER.NUMBER[6,1] : ORDER.NUMBER[1,1] : FIELD(DELIVERY.ID, "*", 4) : ORDER.NUMBER[2,4]
+
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      RETURN
+
+**************************************************************************
+WRITE.CASH.ORDER.HEADER:
+************************
+
+      MAT ORDER.HEADER.REC = ""
+      NO.OF.LINES = 1
+      OH.NATIONAL.CREATOR = "5678" :@VM: "FRED"
+
+      OH.HEALTH.SAFETY.DETS = "WATCH OUT" :@VM: "THERE'S A FLOOD"
+      OH.CT.ORD.NO = "2345DEXX"
+
+      CUST.CODE = "AB4567"
+      CUST.NAME = "JOHN SMITH"
+      OH.CUST.TEL = "01234567890"
+      OH.CUST.MOBILE<1,1> = "07754768012"
+      OH.CUST.MOBILE<1,3> = "N"
+      OH.CUST.MOBILE.2<1,1> = "07754777777"
+      OH.EPOD.EMAIL.ADDRESS = ""
+      OH.CUST.NAME = "JOHN SMITH JR"
+      OH.DELIV.ALT.ADDRESS = "14" :@VM: "MAIN STREET" :@VM: "NICE TERRACE" :@VM: "LONDON" :@VM: "SW1 1AA"
+      DELIV.DATE = 19091
+      OH.NOT.BEFORE = 36000
+      OH.NOT.AFTER = 36600
+      OH.NOT.BETWEEN<1,1> = 43200
+      OH.NOT.BETWEEN<1,2> = 46800
+      OH.TIP.TIME = 1080
+      OH.ORD.DATE = 19100
+
+      IF PARTIAL.DATE = "" THEN
+         OH.PARTIAL.DATE = ""
+      END ELSE
+         OH.PARTIAL.DATE = PARTIAL.DATE
+      END
+
+      IF ORDER.NUMBER.FULL = "B75150-1" THEN
+         OH.CUST.MOBILE<1,1> = "11111111"
+         OH.CUST.MOBILE<1,2> = "AAAAAAAA"
+         OH.CUST.MOBILE<1,3> = "N"
+         OH.CUST.MOBILE.2<1,1> = "22222222"
+         OH.CUST.MOBILE.2<1,2> = "BBBBBBBB"
+         OH.CUST.MOBILE.2<1,3> = "Y"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75150-2" THEN
+         OH.CUST.MOBILE<1,1> = ""
+         OH.CUST.MOBILE<1,2> = ""
+         OH.CUST.MOBILE<1,3> = "N"
+         OH.CUST.MOBILE.2<1,1> = "22222222"
+         OH.CUST.MOBILE.2<1,2> = "BBBBBBBB"
+         OH.CUST.MOBILE.2<1,3> = "Y"
+      END
+
+      ORDER.HEADER.KEY = ORDER.NUMBER[6,1] : ORDER.NUMBER[1,1] : FIELD(DELIVERY.ID, "*", 4) : ORDER.NUMBER[2,4]
+
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      RETURN
+
+**************************************************************************
+WRITE.IBT.ORDER.HEADER:
+***********************
+
+      MAT ORDER.HEADER.REC = ""
+      NO.OF.LINES = 1
+      OH.HEALTH.SAFETY.DETS = "" :@VM: "THERE'S A FLOOD"
+      DELIV.INST.1 = "POT HOLES!"
+      OH.CT.ORD.NO = "2345DEXX"
+
+      CUST.CODE = "7777"
+      CUST.NAME = "JOHN SMITH"
+      OH.CUST.TEL = "01234567890"
+      OH.CUST.MOBILE<1,1> = ""
+      OH.CUST.MOBILE<1,3> = ""
+      OH.CUST.MOBILE.2<1,1> = "07754777777"
+      OH.CUST.NAME = "JOHN SMITH JR"
+      OH.DELIV.ALT.ADDRESS = "14" :@VM: "MAIN STREET" :@VM: "NICE TERRACE" :@VM: "LONDON" :@VM: "SW1 1AA"
+      DELIV.DATE = 19091
+      OH.NOT.BETWEEN<1,1> = 43200
+      OH.NOT.BETWEEN<1,2> = 46800
+      OH.TIP.TIME = 1080
+      OH.ORD.DATE = 19100
+
+      ORDER.HEADER.KEY = ORDER.NUMBER[6,1] : ORDER.NUMBER[1,1] : FIELD(DELIVERY.ID, "*", 4) : ORDER.NUMBER[2,4]
+
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      RETURN
+
+**************************************************************************
+POPULATE.ORDER.LINE.IN.COMMON:
+******************************
+
+      MAT ORDER.LINE.REC = ""
+      OL.PROD.CODE = "123456"
+      IF ORDER.TYPE = "B" THEN
+         OL.PROD.CODE = ""
+         OL.ORD.MAN.IND = "M"
+         OL.PROD.GP.CODE = "32"
+         OL.ORD.MAN.DESC = "Widget"
+      END
+      IF ORDER.TYPE = "M" THEN
+         OL.COFC.THRESHOLD.TYPE = ""
+      END ELSE
+         OL.COFC.THRESHOLD.TYPE = "FSC*15"
+      END
+      OL.ORD.QTY = "3"
+      OL.ORD.QTY.UOM = "EA"
+      OL.LINE.WEIGHT = 3300
+
+      IF ORDER.NUMBER.FULL = "B75140" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "3"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75140-1" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "10"
+         OL.QUANTITY.TAKEN = "2"
+         OL.DATE.TAKEN = "19000"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75140-2" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "10"
+         OL.QUANTITY.TAKEN = "2"
+         OL.DATE.TAKEN = "19000"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75150-1" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "12"
+         OL.QUANTITY.TAKEN = "3" : @VM : "2"
+         OL.DATE.TAKEN = "19000" : @VM : "19001"
+         OL.LINE.WEIGHT = "120000"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75150-2" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "12"
+         OL.QUANTITY.TAKEN = "3" : @VM : "2"
+         OL.DATE.TAKEN = "19000" : @VM : "19001"
+         OL.LINE.WEIGHT = "120000"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75150-3" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "12"
+         OL.QUANTITY.TAKEN = "3" : @VM : "2"
+         OL.DATE.TAKEN = "19000" : @VM : "19001"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75160-1" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "14"
+         OL.QUANTITY.TAKEN = "4" : @VM : "1" : @VM : "5"
+         OL.DATE.TAKEN = "19000" : @VM : "19001" : @VM : "19002"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75160-2" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "14"
+         OL.QUANTITY.TAKEN = "4" : @VM : "1" : @VM : "5"
+         OL.DATE.TAKEN = "19000" : @VM : "19001" : @VM : "19002"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75160-3" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "14"
+         OL.QUANTITY.TAKEN = "4" : @VM : "1" : @VM : "5"
+         OL.DATE.TAKEN = "19000" : @VM : "19001" : @VM : "19002"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75160-4" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "14"
+         OL.QUANTITY.TAKEN = "4" : @VM : "1" : @VM : "5"
+         OL.DATE.TAKEN = "19000" : @VM : "19001" : @VM : "19002"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      IF ORDER.NUMBER.FULL = "B75170-4" THEN
+         OL.PROD.CODE = "123456"
+         OL.ORD.QTY = "14"
+         OL.QUANTITY.TAKEN = "4" : @VM : "1" : @VM : "9"
+         OL.DATE.TAKEN = "19000" : @VM : "19001" : @VM : "19002"
+         OL.LINE.WEIGHT = "0"
+      END
+
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY = ""
+      OETC.LINE.ARRAY<1> = LOWER(ORDER.LINE.DREC)
+
+      RETURN
+
+**************************************************************************
+WRITE.BRN.DETAIL:
+*****************
+
+      MAT BRN.DETAIL.REC = ""
+      BRN.MAILBOX = "JIM"
+      IF DELIV.MAN.BRANCH THEN
+         BRN.BRAND = "TT"
+      END
+      BRN.BRAND.PARENT.EMAIL = "@TRAVIS.MAIL.COM"
+      BRN.MACH.NME = "IBT-MACH"
+      BRN.ACCT.NME = "IBT-ACCT"
+      MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, BRANCH
+      IF ORDER.TYPE = "M" THEN
+         BRN.MAILBOX = "JOHN.SMITH"
+         BRN.BRAND.PARENT.EMAIL = "@MAIL.COM"
+         MATWRITE BRN.DETAIL.REC TO BRN.DETAIL.FV, "7777"
+      END
+      DELIVERY.MANAGEMENT.PARAMS = ""
+      DELIVERY.MANAGEMENT.PARAMS<31> = "A" :@VM: "T" :@VM: "Z"
+      DELIVERY.MANAGEMENT.PARAMS<37> = "BMX"
+      DELIVERY.MANAGEMENT.PARAMS<41> = "BMXSTD" : @VM : "BMXPRM"
+      DELIVERY.MANAGEMENT.PARAMS<48> = "TPDELPRM":@VM:"TPDELSTD":@VM:"TPCOLLPRM":@VM:"TPCOLLSTD"
+      WRITE DELIVERY.MANAGEMENT.PARAMS TO SY.PARAMS.FV, "DELIVERY.MANAGEMENT.PARAMS"
+
+      RETURN
+
+**************************************************************************
+WRITE.HO.CUSTOMER:
+******************
+
+      HO.CUSTOMER.REC = ""
+      HO.CUSTOMER.REC<126> = "JEFF.SMITH@MAIL.COM"
+      WRITE HO.CUSTOMER.REC TO HO.CUSTOMER.FV, CUST.CODE
+
+      RETURN
+
+**************************************************************************
+WRITE.BS.DELIVERY.SLOTS:
+************************
+
+      BS.DELIVERY.SLOTS.REC = ""
+      BS.DELIVERY.SLOTS.REC<2> = FROM.TIME
+      BS.DELIVERY.SLOTS.REC<3> = TO.TIME
+      WRITE BS.DELIVERY.SLOTS.REC TO BS.DELIVERY.SLOTS.FV, OH.DELIVERY.SLOT
+
+      RETURN
+
+*************************************************************************
+WRITE.PF.PRODUCT.MASTER:
+************************
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "BALLPENE HAMMER (SMALL)"
+      PF.MST.BAR.CDS = "5010034008854"
+      PF.MST.DOP.REQUIRED = "Y"
+      PF.MST.SINGLE.LITRES = 190650
+      PF.MST.SINGLE.UOM = "BG"
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, OL.PROD.CODE
+
+      RETURN
+
+**************************************************************************
+BUILD.EXPECTED.JOB.DATA:
+************************
+
+      JOB.DATA = ""
+
+      JOB.DELIVERY.COST.CENTRE = BRANCH
+      JOB.SALES.COST.CENTRE = "5678"
+      JOB.WINDOW.EARLIEST.DATE = "20200407"
+      JOB.WINDOW.EARLIEST.TIME = "1000"
+      JOB.WINDOW.LATEST.DATE = "20200407"
+      JOB.WINDOW.LATEST.TIME = "1010"
+      JOB.WINDOW.EXCLUSION.START.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.START.TIME = "1200"
+      JOB.WINDOW.EXCLUSION.END.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.END.TIME = "1300"
+      JOB.SALES.CONTACT = "FRED"
+      JOB.LINE.PRODUCT.CODE = "123456"
+      JOB.LINE.BARCODE = "5010034008854"
+      JOB.LINE.DESCRIPTION = "BALLPENE HAMMER (SMALL)"
+      JOB.LINE.INDICATOR = "FSC" :@SVM: "CE"
+      JOB.CUST.ACCOUNT.ID = "AB4567"
+*     JOB.LINE.RESTRICTED = ""
+
+      IF ORDER.TYPE = "F" THEN
+         GOSUB SETUP.FOR.F.TICKET
+      END ELSE
+
+         IF ORDER.TYPE = "M" THEN
+            GOSUB SETUP.FOR.M.TICKET
+
+         END ELSE
+            GOSUB SETUP.FOR.B.TICKET
+         END
+         JOB.CUST.ACCOUNT.ADDR.LINE1 = ""
+         JOB.CUST.ACCOUNT.ADDR.LINE2 = ""
+         JOB.CUST.ACCOUNT.ADDR.LINE3 = ""
+         JOB.CUST.ACCOUNT.ADDR.LINE4 = ""
+         JOB.CUST.ACCOUNT.ADDR.POSTCODE = ""
+         JOB.CUST.ACCOUNT.ADDR.COUNTRY = ""
+         JOB.INDICATORS.SPECIAL.CONDITIONS = @FALSE
+      END
+
+      JOB.CUST.TITLE = ""
+      JOB.CUST.INITIALS = ""
+      JOB.CUST.FIRST.NAME = "JOHN SMITH"
+      JOB.CUST.LAST.NAME = ""
+      JOB.CUST.HOME.PHONE = "01234567890"
+      JOB.CUST.CONTACT.NAME = "JOHN SMITH JR"
+      JOB.CUST.ACCOUNT.ADDR.NUMBER = ""
+      JOB.DESTINATION.ID = "186C4E560721B5E0AF02E408AEC3A86E"
+      JOB.CUST.ACCOUNT.ADDR.NAME = ""
+      JOB.DESTINATION.ADDR.NUMBER = ""
+      JOB.DESTINATION.ADDR.NAME = ""
+      JOB.DESTINATION.ADDR.LINE1 = "14"
+      JOB.DESTINATION.ADDR.LINE2 = "MAIN STREET"
+      JOB.DESTINATION.ADDR.LINE3 = "NICE TERRACE"
+      JOB.DESTINATION.ADDR.LINE4 = "LONDON"
+      JOB.DESTINATION.ADDR.POSTCODE = "SW1A 1AA"
+      JOB.DESTINATION.ADDR.COUNTRY = "GB"
+      JOB.MINUTES.ALLOWED.FOR.DELIVERY = 18
+      JOB.GROUP.ID = ""
+      JOB.SEQUENCE.IN.GROUP = 0
+      JOB.VEHICLE.RESTRICTIONS = ""
+      JOB.PRIORITY = 0
+      JOB.INDICATORS.KNOWN.HAZARDS = @TRUE
+      IF ORDER.NUMBER.FULL = "F12348" THEN
+         JOB.INDICATORS.KNOWN.HAZARDS = @FALSE
+      END
+      JOB.CUSTOMER.ORDER.REF = "2345DEXX"
+      JOB.LINE.DISPLAY.NUMBER = 1
+      JOB.LINE.DELIVERY.OR.COLLECTION = "DELIVERY"
+      JOB.LINE.QUANTITY = "3"
+      JOB.LINE.UOM = "EA"
+      JOB.LINE.WEIGHT = 1.1
+      JOB.LINE.LENGTH = 0
+      JOB.LINE.WIDTH = 0
+      JOB.LINE.DEPTH = 0
+      JOB.ITEMS.OUTSTANDING.CODE = ""
+      JOB.ITEMS.OUTSTANDING.DESCRIPTION = ""
+      JOB.ITEMS.OUTSTANDING.QUANTITY = ""
+      JOB.ITEMS.OUTSTANDING.UOM = ""
+      JOB.ORDER.DATE = "20200416"
+      JOB.CONTACT.SMS = ""
+      JOB.EPOD.PER.TKT.SIG = @FALSE
+      JOB.SERVICE.LEVEL = ""
+      JOB.TYPE.REF = "STDJOB"
+      JOB.VEHICLE.TYPE = ""
+      IF JOB.INDICATORS.SPECIAL.CONDITIONS THEN
+         JOB.SERVICE.LEVEL = "TPDELPRM"
+      END ELSE
+         JOB.SERVICE.LEVEL = "TPDELSTD"
+      END
+
+      RETURN
+
+**************************************************************************
+SETUP.FOR.F.TICKET:
+*******************
+      JOB.SALES.ORDER.NUMBER = "F12345*v01"
+      JOB.SALES.ORDER.KEY = "19091*F12345*v01*0123"
+      JOB.CUST.EPOD.EMAIL = "JOHN.SMITH@MAIL.COM" :@VM: "JEFF.SMITH@MAIL.COM"
+      JOB.CUST.ACCOUNT.ADDR.LINE1 = "14"
+      JOB.CUST.ACCOUNT.ADDR.LINE2 = "MAIN STREET"
+      JOB.CUST.ACCOUNT.ADDR.LINE3 = "NICE TERRACE"
+      JOB.CUST.ACCOUNT.ADDR.LINE4 = "LONDON"
+      JOB.CUST.ACCOUNT.ADDR.POSTCODE = "SW1A 1AA"
+      JOB.CUST.ACCOUNT.ADDR.COUNTRY = "GB"
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @TRUE
+      JOB.INSTRUCTIONS = "TURN LEFT" :@VM: "TURN RIGHT"
+      JOB.NOTES = "WATCH OUT"
+      JOB.PAYMENT.METHOD = "ACCOUNT DELIVERED"
+      JOB.LINE.ORIGINATOR.KEY = "19091*F12345*v01*0123*123456*001"
+      JOB.CUST.MOBILE.PHONE = "07754768012"
+      JOB.CUST.WORK.PHONE = "07754777777"
+      IF ORDER.NUMBER.FULL = "F12346" THEN
+         JOB.SALES.COST.CENTRE = "0123"
+         JOB.SALES.CONTACT = ""
+         JOB.SALES.ORDER.NUMBER = "F12346*v01"
+         JOB.SALES.ORDER.KEY = "19091*F12346*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*F12346*v01*0123*123456*001"
+      END
+      IF ORDER.NUMBER.FULL = "F12347" THEN
+         JOB.SALES.COST.CENTRE = "0123"
+         JOB.SALES.CONTACT = ""
+         JOB.SALES.ORDER.NUMBER = "F12347*v01"
+         JOB.SALES.ORDER.KEY = "19091*F12347*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*F12347*v01*0123*123456*001"
+         JOB.NOTES = ""
+      END
+      IF ORDER.NUMBER.FULL = "F12348" THEN
+         JOB.SALES.COST.CENTRE = "0123"
+         JOB.SALES.CONTACT = ""
+         JOB.SALES.ORDER.NUMBER = "F12348*v01"
+         JOB.SALES.ORDER.KEY = "19091*F12348*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*F12348*v01*0123*123456*001"
+         JOB.NOTES = ""
+      END
+      RETURN
+
+**************************************************************************
+SETUP.FOR.M.TICKET:
+*******************
+      JOB.SALES.ORDER.NUMBER = "M12345*v01"
+      JOB.SALES.ORDER.KEY = "19091*M12345*v01*0123"
+      JOB.CUST.ACCOUNT.ID = "7777"
+      JOB.SALES.COST.CENTRE = "0123"
+      JOB.CUST.EPOD.EMAIL = "JIM@TRAVIS.MAIL.COM"
+      JOB.WINDOW.EARLIEST.DATE = "20200407"
+      JOB.WINDOW.EARLIEST.TIME = "0000"
+      JOB.WINDOW.LATEST.DATE = "20200407"
+      JOB.WINDOW.LATEST.TIME = "2359"
+      JOB.WINDOW.EXCLUSION.START.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.START.TIME = "1200"
+      JOB.WINDOW.EXCLUSION.END.DATE = "20200407"
+      JOB.WINDOW.EXCLUSION.END.TIME = "1300"
+      JOB.NOTES = "THERE'S A FLOOD"
+      JOB.INSTRUCTIONS = "POT HOLES!"
+      JOB.PAYMENT.METHOD = "IBT"
+      JOB.LINE.ORIGINATOR.KEY = "19091*M12345*v01*0123*123456*001"
+      JOB.SALES.CONTACT = ""
+      JOB.LINE.INDICATOR = "CE"
+      JOB.CUST.WORK.PHONE = "07754777777"
+      JOB.CUST.MOBILE.PHONE = ""
+
+      RETURN
+
+**************************************************************************
+SETUP.FOR.B.TICKET:
+*******************
+      JOB.SALES.ORDER.NUMBER = "B12345*v01"
+      JOB.SALES.ORDER.KEY = "19091*B12345*v01*0123"
+      JOB.CUST.EPOD.EMAIL = ""
+      JOB.NOTES = "WATCH OUT" :@VM: "THERE'S A FLOOD"
+      JOB.INSTRUCTIONS = ""
+      JOB.PAYMENT.METHOD = "CASH DELIVERED"
+      JOB.LINE.ORIGINATOR.KEY = "19091*B12345*v01*0123*32*001"
+      JOB.LINE.PRODUCT.CODE = "32"
+      JOB.LINE.BARCODE = "001B12345*v01"
+      JOB.LINE.DESCRIPTION = "Widget"
+      JOB.LINE.INDICATOR = "FSC"
+      JOB.CUST.MOBILE.PHONE = ""
+      JOB.CUST.WORK.PHONE = "07754768012"
+      IF ORDER.NUMBER.FULL = "B75140" THEN
+         JOB.SALES.ORDER.NUMBER = "B75140*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75140*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75140*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75140*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75140-1" THEN
+         JOB.SALES.ORDER.NUMBER = "B75140-1*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75140-1*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75140-1*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75140-1*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75140-2" THEN
+         JOB.SALES.ORDER.NUMBER = "B75140-2*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75140-2*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75140-2*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75140-2*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75150-1" THEN
+         JOB.SALES.ORDER.NUMBER = "B75150-1*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75150-1*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75150-1*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75150-1*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75150-2" THEN
+         JOB.SALES.ORDER.NUMBER = "B75150-2*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75150-2*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75150-2*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75150-2*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75150-3" THEN
+         JOB.SALES.ORDER.NUMBER = "B75150-3*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75150-3*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75150-3*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75150-3*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75160-1" THEN
+         JOB.SALES.ORDER.NUMBER = "B75160-1*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75160-1*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75160-1*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75160-1*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75160-2" THEN
+         JOB.SALES.ORDER.NUMBER = "B75160-2*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75160-2*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75160-2*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75160-2*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75160-3" THEN
+         JOB.SALES.ORDER.NUMBER = "B75160-3*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75160-3*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75160-3*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75160-3*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75160-4" THEN
+         JOB.SALES.ORDER.NUMBER = "B75160-4*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75160-4*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75160-4*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75160-4*v01"
+      END
+      IF ORDER.NUMBER.FULL = "B75170-4" THEN
+         JOB.SALES.ORDER.NUMBER = "B75170-4*v01"
+         JOB.SALES.ORDER.KEY = "19091*B75170-4*v01*0123"
+         JOB.LINE.ORIGINATOR.KEY = "19091*B75170-4*v01*0123*32*001"
+         JOB.LINE.BARCODE = "001B75170-4*v01"
+      END
+
+      RETURN
+
+**************************************************************************
+ADD.SECOND.LINE:
+****************
+
+      IF ORDER.TYPE = "M" THEN
+         JOB.CUST.EPOD.EMAIL = "JOHN.SMITH@MAIL.COM" :@VM: "JOHN.SMITH@MAIL.COM"
+         OH.EPOD.EMAIL.ADDRESS = "JOHN.SMITH@MAIL.COM"
+      END
+      NO.OF.LINES = 2
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT ORDER.LINE.REC = ""
+      OL.PROD.CODE = "789012"
+      OL.ORD.QTY = "2"
+      OL.ORD.QTY.UOM = "BX"
+      OL.LINE.WEIGHT = 5250
+      OL.COFC.THRESHOLD.TYPE = "NONE*20"
+
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY<2> = LOWER(ORDER.LINE.DREC)
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "BALLPENE HAMMER (EX LARGE)"
+      PF.MST.SINGLE.LITRES = 190650
+      IF ORDER.TYPE = "M" THEN
+         PF.MST.BAR.CDS = ""
+         JOB.LINE.BARCODE := @VM: OL.PROD.CODE
+         PF.MST.DOP.REQUIRED = ""
+         JOB.LINE.INDICATOR := @VM: ""
+      END ELSE
+         PF.MST.BAR.CDS = "1311134008854"
+         JOB.LINE.BARCODE := @VM: PF.MST.BAR.CDS
+         PF.MST.DOP.REQUIRED = "Y"
+         JOB.LINE.INDICATOR := @VM: "CE"
+      END
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, OL.PROD.CODE
+
+      JOB.LINE.DISPLAY.NUMBER := @VM: 2
+      JOB.LINE.ORIGINATOR.KEY := @VM: DELIVERY.ID : "*789012*002"
+      JOB.LINE.DELIVERY.OR.COLLECTION := @VM: "DELIVERY"
+      JOB.LINE.PRODUCT.CODE := @VM: "789012"
+      JOB.LINE.QUANTITY := @VM: "2"
+      JOB.LINE.UOM := @VM: "BX"
+      JOB.LINE.DESCRIPTION := @VM: "BALLPENE HAMMER (EX LARGE)"
+      JOB.LINE.WEIGHT := @VM: 2.625
+      JOB.LINE.LENGTH := @VM: 0
+      JOB.LINE.WIDTH := @VM: 0
+      JOB.LINE.DEPTH := @VM: 0
+
+      RETURN
+
+**************************************************************************
+ADD.THIRD.LINE:
+***************
+
+      NO.OF.LINES = 3
+      OH.EPOD.EMAIL.ADDRESS = ""
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT ORDER.LINE.REC = ""
+      OL.PROD.CODE = "789012"
+      OL.ORD.QTY = "2"
+      OL.ORD.QTY.UOM = "BX"
+      OL.COFC.THRESHOLD.TYPE = "NONE*20"
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY<3> = LOWER(ORDER.LINE.DREC)
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "BALLPENE HAMMER (EX LARGE)"
+      PF.MST.BAR.CDS = "1311134008854"
+      PF.MST.DOP.REQUIRED = "Y"
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, OL.PROD.CODE
+
+      JOB.CUST.EPOD.EMAIL = "JEFF.SMITH@MAIL.COM"
+      JOB.LINE.DISPLAY.NUMBER := @VM: 3
+      JOB.LINE.ORIGINATOR.KEY := @VM: DELIVERY.ID : "*789012*003"
+      JOB.LINE.DELIVERY.OR.COLLECTION := @VM: "DELIVERY"
+      JOB.LINE.PRODUCT.CODE := @VM: "789012"
+      JOB.LINE.BARCODE := @VM: "1311134008854"
+      JOB.LINE.QUANTITY := @VM: "2"
+      JOB.LINE.UOM := @VM: "BX"
+      JOB.LINE.DESCRIPTION := @VM: "BALLPENE HAMMER (EX LARGE)"
+      JOB.LINE.WEIGHT := @VM: 0
+      JOB.LINE.LENGTH := @VM: 0
+      JOB.LINE.WIDTH := @VM: 0
+      JOB.LINE.DEPTH := @VM: 0
+      JOB.LINE.INDICATOR := @VM: "CE"
+
+      RETURN
+
+**************************************************************************
+ADD.DELETED.LINE:
+*****************
+
+      NO.OF.LINES = 2
+      OH.REQ.VEHICLE = ""
+      OH.HEALTH.SAFETY.DETS = ""
+      OH.DELIVERY.SLOT = "002"
+      OH.NATIONAL.CREATOR = "5678"
+      OH.EPOD.EMAIL.ADDRESS = ""
+      OH.EMAIL.NOTIFICATION = "JOHN.SMITH2@MAIL.COM"
+      OH.DELIV.ALT.ADDRESS = ""
+      OH.NOT.BEFORE = ""
+      OH.RRP.FLEXIBLE.DEL.DATE = 19100
+      OH.NOT.AFTER = ""
+      OH.NOT.BETWEEN = ""
+      OH.TIP.TIME = ""
+      DELIV.ADDR.1 = "14 MAIN STREET"
+      DELIV.ADDR.2 = "NICE TERRACE"
+      DELIV.ADDR.3 = "LONDON"
+      DELIV.ADDR.4 = "SW1A 1AA"
+      AUTH.ID = "WINSTON"
+      OH.ORD.DATE = 19100
+
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT ORDER.LINE.REC = ""
+      OL.ORD.DEL.FLG = "Y"
+      OL.PROD.CODE = "789012"
+      OL.ORD.QTY = "2"
+      OL.ORD.QTY.UOM = "BX"
+      OL.LINE.WEIGHT = 5.25
+      OL.COFC.THRESHOLD.TYPE = "PEFC*20"
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY<2> = LOWER(ORDER.LINE.DREC)
+
+      FROM.TIME = 37200
+      TO.TIME = 37800
+      GOSUB WRITE.BS.DELIVERY.SLOTS
+
+      JOB.SALES.COST.CENTRE = "5678"
+      JOB.CUST.EPOD.EMAIL = "JOHN.SMITH2@MAIL.COM" :@VM: "JEFF.SMITH@MAIL.COM"
+      JOB.DESTINATION.ADDR.LINE1 = DELIV.ADDR.1
+      JOB.DESTINATION.ADDR.LINE2 = DELIV.ADDR.2
+      JOB.DESTINATION.ADDR.LINE3 = DELIV.ADDR.3
+      JOB.DESTINATION.ADDR.LINE4 = DELIV.ADDR.4
+      JOB.WINDOW.EARLIEST.DATE = "20200407"
+      JOB.WINDOW.EARLIEST.TIME = "1020"
+      JOB.WINDOW.LATEST.DATE = "20200407"
+      JOB.WINDOW.LATEST.TIME = "1030"
+      JOB.WINDOW.EXCLUSION.START.DATE = ""
+      JOB.WINDOW.EXCLUSION.START.TIME = ""
+      JOB.WINDOW.EXCLUSION.END.DATE = ""
+      JOB.WINDOW.EXCLUSION.END.TIME = ""
+      JOB.MINUTES.ALLOWED.FOR.DELIVERY = 0
+      JOB.VEHICLE.RESTRICTIONS = ""
+      JOB.INDICATORS.KNOWN.HAZARDS = @FALSE
+      JOB.NOTES = ""
+      JOB.SALES.CONTACT = "WINSTON"
+
+      RETURN
+
+**************************************************************************
+ADD.MCP.LINE:
+*************
+
+      IF ORDER.TYPE = "M" THEN
+         JOB.CUST.EPOD.EMAIL = ""
+         WRITE "" TO BRN.DETAIL.FV, BRANCH
+      END
+      IF ORDER.TYPE = "B" THEN
+         HO.CUSTOMER.REC = ""
+         WRITE HO.CUSTOMER.REC TO HO.CUSTOMER.FV, CUST.CODE
+      END
+
+      NO.OF.LINES = 2
+      OH.DELIVERY.SLOT = ""
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT ORDER.LINE.REC = ""
+      OL.PROD.CODE = "139214"
+      OL.ORD.QTY = "2"
+      OL.ORD.QTY.UOM = "EA"
+      OL.COFC.THRESHOLD.TYPE = "FSC*20"
+      IF ORDER.TYPE = "B" THEN
+         OL.COFC.THRESHOLD.TYPE = "NONE*20"
+      END
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY<2> = LOWER(ORDER.LINE.DREC)
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "HOLBORN CREAM 600 UNIT"
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, OL.PROD.CODE
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "90 CLIP HINGE/PLATE PACK"
+      PF.MST.BAR.CDS = "1235694008854"
+      JOB.LINE.BARCODE := @VM: PF.MST.BAR.CDS
+      PF.MST.DOP.REQUIRED = "Y"
+      IF ORDER.TYPE = "B" THEN
+         JOB.LINE.INDICATOR := @VM: "CE"
+      END ELSE
+         JOB.LINE.INDICATOR := @VM: "FSC" :@SVM: "CE"
+      END
+      PF.MST.STOCK.UOM = "EA"
+      PF.MST.WEIGHT = 0.75
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, 385368
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "FLAP STAY INC FITTINGS"
+      JOB.LINE.BARCODE := @VM: "751356"
+      PF.MST.DOP.REQUIRED = "N"
+      IF ORDER.TYPE = "B" THEN
+         JOB.LINE.INDICATOR := @VM: ""
+      END ELSE
+         JOB.LINE.INDICATOR := @VM: "FSC"
+      END
+      PF.MST.STOCK.UOM = "EA"
+      PF.MST.WEIGHT = 0.6
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, 751356
+
+      MAT PF.PRODUCT.MASTER.REC = ""
+      PF.MST.DESC = "HOLBORN CRM 600 MID HEIGHT FTR FASCIA"
+      PF.MST.BAR.CDS = "9865326594924"
+      JOB.LINE.BARCODE := @VM: PF.MST.BAR.CDS
+      PF.MST.DOP.REQUIRED = "Y"
+      IF ORDER.TYPE = "B" THEN
+         JOB.LINE.INDICATOR := @VM: "CE"
+      END ELSE
+         JOB.LINE.INDICATOR := @VM: "FSC" :@SVM: "CE"
+      END
+      PF.MST.STOCK.UOM = "EA"
+      MATWRITE PF.PRODUCT.MASTER.REC TO PF.PRODUCT.MASTER.FV, 381500
+
+      MAT PF.MCP.PRODUCT.REC = ""
+      PF.MCP.NO.OF.PRODUCTS = 3
+      PF.MCP.PROD.CODES = 385368 :@VM: 751356 :@VM: 381500
+      PF.MCP.QTYS = 1 :@VM: 2 :@VM: 5
+      MATWRITE PF.MCP.PRODUCT.REC TO PF.MCP.PRODUCTS.FV, OL.PROD.CODE
+
+      JOB.LINE.DISPLAY.NUMBER := @VM: 2.01 : @VM: 2.02 :@VM: 2.03
+      JOB.LINE.ORIGINATOR.KEY := @VM: DELIVERY.ID :"*385368*002*01" :@VM: DELIVERY.ID :"*751356*002*02" :@VM: DELIVERY.ID :"*381500*002*03"
+      JOB.LINE.DELIVERY.OR.COLLECTION := @VM: "DELIVERY" :@VM: "DELIVERY" :@VM: "DELIVERY"
+      JOB.LINE.PRODUCT.CODE := @VM: "385368" :@VM: "751356" :@VM: "381500"
+      JOB.LINE.QUANTITY := @VM: "2" :@VM: "4" :@VM: "10"
+      JOB.LINE.UOM := @VM: "EA" :@VM: "EA" :@VM: "EA"
+      JOB.LINE.DESCRIPTION := @VM: "90 CLIP HINGE/PLATE PACK" :@VM: "FLAP STAY INC FITTINGS" :@VM: "HOLBORN CRM 600 MID HEIGHT FTR FASCIA"
+      JOB.LINE.WEIGHT := @VM: 0.75 :@VM: 0.6 :@VM: 0
+      JOB.LINE.LENGTH := @VM: 190650 :@VM: 190650 :@VM: 190650
+      JOB.LINE.WIDTH := @VM: 10 :@VM: 10 :@VM: 10
+      JOB.LINE.DEPTH := @VM: 10 :@VM: 10 :@VM: 10
+
+      RETURN
+
+**************************************************************************
+ADD.SUNDRY.LINE:
+****************
+
+      IF ORDER.TYPE = "M" THEN
+         JOB.CUST.EPOD.EMAIL = "JOHN.SMITH@MAIL.COM" :@VM: "JIM@TRAVIS.MAIL.COM"
+         OH.EPOD.EMAIL.ADDRESS = "JOHN.SMITH@MAIL.COM"
+      END
+      NO.OF.LINES = 2
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      MAT ORDER.LINE.REC = ""
+      OL.PROD.CODE = "SUNDRY"
+      OL.ORD.QTY = "1"
+      OL.ORD.QTY.UOM = "EA"
+      MATBUILD ORDER.LINE.DREC FROM ORDER.LINE.REC
+      OETC.LINE.ARRAY<2> = LOWER(ORDER.LINE.DREC)
+
+      RETURN
+
+**************************************************************************
+ADD.ALL.VEHICLE.RESTRICTIONS:
+*****************************
+
+      OH.BAN.VEHICLE = "A" :@VM:"B"
+      OH.REQ.VEHICLE = "C"
+      OH.REQ.VEHICLE.REG = "ABC123"
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      JOB.VEHICLE.RESTRICTIONS = ""
+
+      JOB.INDICATORS.SPECIAL.CONDITIONS = @TRUE
+
+      JOB.INSTRUCTIONS = "Banned Text" : @VM : "Max Text" : @VM : "etc!"
+
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.JOB.INSTRUCTIONS", JOB.INSTRUCTIONS, "")
+      CALL MOCK.WANT(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "OUT.SPECIAL.CONDITIONS", @TRUE, "")
+
+      RETURN
+
+**************************************************************************
+SAVE.RESTRICTIONS:
+******************
+
+      BITS = DCOUNT(OH.DELIV.LOAD, @VM)
+      IF BITS = 0 THEN
+         BITS = 1
+      END
+      OH.DELIV.LOAD.TIMES.RESTRICTIONS<1,BITS> = ""
+      BITS.WORK = OH.CUST.MOBILE :@AM: OH.CUST.MOBILE.2
+      BITS.WORK := @AM: OH.ALERT.EMAIL.ADDRESS :@AM: OH.COLLECTED
+      BITS.WORK := @AM: OH.EPOD.EMAIL.ADDRESS :@AM: OH.EPOD.PER.TKT.SIG
+      BITS.WORK := @AM: OH.DELIVERY.SLOT :@AM: OH.TIP.TIME :@AM: OH.HEALTH.SAFETY.INDS
+      BITS.WORK := @AM: OH.HEALTH.SAFETY.DETS :@AM: OH.NOT.BETWEEN
+      BITS.WORK := @AM: OH.NOT.BEFORE :@AM: OH.NOT.AFTER
+      BITS.WORK := @AM: OH.BAN.VEHICLE :@AM: OH.REQ.VEHICLE
+      BITS.WORK := @AM: OH.REQ.VEHICLE.REG
+      BITS.WORK = LOWER(BITS.WORK)
+      BITS.WORK = LOWER(BITS.WORK)
+      OH.DELIV.LOAD.TIMES.RESTRICTIONS = BITS.WORK
+
+      MATWRITE ORDER.HEADER.REC TO ORDER.HEADER.FV, ORDER.HEADER.KEY
+
+      RETURN
+
+**************************************************************************
+TEAR.DOWN:
+**********
+
+      CALL MOCK.CLEAR(BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS.MOCK, "")
+      CALL MOCK.CLEAR(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK, "")
+      CALL MOCK.CLEAR(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK, "")
+      CALL MOCK.CLEAR(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "")
+      CALL MOCK.CLEAR(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "")
+      CALL MOCK.CLEAR(GET.ORDER.BRAND.MOCK, "")
+      CALL MOCK.CLEAR(CREATE.TEMP.QPOINTER.MOCK, "")
+      CALL MOCK.CLEAR(MOCK.UTL.SYSTEM, ERR.TEXT)
+      CALL MOCK.CLEAR(FACTOR.MOCK, "")
+      CLEARFILE ORDER.HEADER.FV
+      CLEARFILE BRN.DETAIL.FV
+      CLEARFILE HO.CUSTOMER.FV
+      CLEARFILE BS.DELIVERY.SLOTS.FV
+      CLEARFILE PF.PRODUCT.MASTER.FV
+      CLEARFILE SY.PARAMS.FV
+      CLEARFILE PO.HEADER.FV
+      CLEARFILE PO.LINE.FV
+      CLEARFILE DOC.HIST.FV
+
+      PARTIAL.DATE = ""
+
+      RETURN
+
+**************************************************************************
+CREATE.MOCKS:
+*************
+
+      ARGS = "ADDRESS, MODE, TRIMMED, POSTCODE, RETURN.MODE, SPARE1, SPARE2, SPARE3, SPARE4, SPARE5"
+      BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS.MOCK = MOCK.CREATE("BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS", ARGS, "")
+
+      ARGS = "ADDRESS.LINE.1, ADDRESS.LINE.2, ADDRESS.LINE.3, ADDRESS.LINE.4, POSTCODE, COUNTRY, ADDRESS.HASH, ERROR.MESSAGE"
+      DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK = MOCK.CREATE("DELIV.MAN.GENERATE.ADDRESS.HASH", ARGS, "")
+
+      ARGS = "DELIVERY.ID, TO.FOLLOW.LIST, ERROR.MESSAGE, PASSED.ORDER.HEADER.FV, PASSED.ORDER.LINE.FV, MODE, ARRAY.OF.VALID.LINE.NBRS"
+      DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK = MOCK.CREATE("DELIV.MAN.GET.BALANCE.TO.FOLLOW", ARGS, "")
+
+      ARGS = "IN.INSTRUCTION.LINE.1,IN.INSTRUCTION.LINE.2,"
+      ARGS := "IN.BANNED.VEHICLE.TYPE, IN.MAX.VEHICLE.TYPE,"
+      ARGS := "IN.RQD.VEHICLE.TYPE, IN.RQD.VEHICLE.REG, IN.DELIVERY.SLOT,"
+      ARGS := "OUT.JOB.INSTRUCTIONS, OUT.SPECIAL.CONDITIONS,"
+      ARGS := "OUT.ERROR.MESSAGE"
+      DELIV.MAN.GET.INSTRUCTIONS.MOCK = MOCK.CREATE("DELIV.MAN.GET.INSTRUCTIONS", ARGS, "")
+
+      ARGS = "IN.LITRES.VALUE.X.10K, IN.UOM.FOR.LITRES.VALUE, IN.UOM.FOR.DIMENSIONS, MAT PF.PRODUCT.MASTER.REC,"
+      ARGS := " OUT.LENGTH.IN.MM, OUT.WIDTH.IN.MM, OUT.DEPTH.IN.MM"
+      DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK = MOCK.CREATE("DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM", ARGS, "")
+
+      ARGS = "BEAMISH.SET,LONG.BRAND,SHORT.BRAND,COST.CENTRE,SPARE1,SPARE2,SPARE3,SPARE4,SPARE5"
+      GET.ORDER.BRAND.MOCK = MOCK.CREATE("GET.ORDER.BRAND", ARGS, "")
+
+      ARGS = "ACTION, MACHINE, ACCOUNT, FILENAME, QPOINTER, ERR.MSG"
+      CREATE.TEMP.QPOINTER.MOCK = MOCK.CREATE("CREATE.TEMP.QPOINTER", ARGS, "")
+
+      ARGS = "FUNCTION.ID,RESPONSE"
+      MOCK.UTL.SYSTEM = MOCK.CREATE("UTL.SYSTEM", ARGS, ERR.TEXT)
+
+      ARGS = "QTY,QTY.UOM,RESULT,RESULT.UOM,MAT PF.PRODUCT.MASTER.REC,ERROR,ERROR.MSG"
+      FACTOR.MOCK = MOCK.CREATE("FACTOR.QTY",ARGS,"")
+
+      RETURN
+
+**************************************************************************
+DELETE.MOCKS:
+*************
+
+      CALL MOCK.DELETE(BS.OE.EXTRACT.POSTCODE.FROM.ADDRESS.MOCK, "")
+      CALL MOCK.DELETE(DELIV.MAN.GENERATE.ADDRESS.HASH.MOCK , "")
+      CALL MOCK.DELETE(DELIV.MAN.GET.BALANCE.TO.FOLLOW.MOCK , "")
+      CALL MOCK.DELETE(DELIV.MAN.GET.INSTRUCTIONS.MOCK, "")
+      CALL MOCK.DELETE(DELIV.MAN.CONVERT.LITRES.TO.DIMS.IN.MM.MOCK, "")
+      CALL MOCK.DELETE(GET.ORDER.BRAND.MOCK, "")
+      CALL MOCK.DELETE(CREATE.TEMP.QPOINTER.MOCK, "")
+      CALL MOCK.DELETE(MOCK.UTL.SYSTEM, ERR.TEXT)
+      CALL MOCK.DELETE(FACTOR.MOCK,"")
+
+      RETURN
+
+**************************************************************************
+DO.CALL:
+********
+
+      CALL DELIV.MAN.BUILD.ORDER.JOB.DATA(DELIVERY.ID, JOB.DATA, ERROR.MESSAGE, MODE,
+         PASSED.ORDER.HEADER.FV, PASSED.ORDER.LINE.FV, ARRAY.OF.VALID.LINE.NBRS)
+
+      RETURN
+
+**************************************************************************
+CALL.ANNOUNCE.TEST.CASE:
+************************
+
+      CALL ANNOUNCE.TEST.CASE(RESULTS, TEST.PRINT)
+
+      RETURN
+
+**************************************************************************
+CALL.ASSERT.EQUALS:
+*******************
+
+      CALL ASSERT.EQUALS(ASSERT.PRINT, EXPECTED.RESULT, ACTUAL.RESULT, RESULTS)
+
+      RETURN
+
+**************************************************************************
+   END
